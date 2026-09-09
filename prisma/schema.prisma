@@ -1,0 +1,1117 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  admin
+  lawyer
+  client
+}
+
+enum LeadStatus {
+  new
+  screening
+  referred
+  consultation_set
+  retained
+  declined
+  archived
+}
+
+enum MatterStatus {
+  pending
+  active
+  completed
+}
+
+enum Visibility {
+  internal
+  client_shared
+  client_visible
+}
+
+enum CommunicationType {
+  portal_message
+  note
+  email_log
+  call_log
+  meeting_log
+  titan_email
+}
+
+enum InvoiceStatus {
+  draft
+  unpaid
+  due
+  paid
+  overdue
+  void
+}
+
+enum DraftStatus {
+  draft
+  ready
+  sent_for_signature
+  signed
+}
+
+enum TrustTransactionType {
+  deposit
+  applied_to_invoice
+  refund
+  adjustment
+}
+
+model User {
+  id            Int      @id @default(autoincrement())
+  full_name     String
+  email         String   @unique
+  password_hash String
+  role          Role     @default(client)
+  is_active     Boolean  @default(true)
+  created_at    DateTime @default(now())
+  updated_at    DateTime @updatedAt
+  must_reset_password Boolean @default(false)
+  last_login_at DateTime?
+
+  roles         UserRole[] @relation("UserRoles")
+  client        Client?
+  lawyer        Lawyer?
+  created_leads Lead[]   @relation("CreatedBy")
+  matters       Matter[] @relation("CreatedBy")
+  assigned_matters Matter[] @relation("AssignedLawyer")
+  documents     Document[]
+  messages      Communication[]
+  invoices      Invoice[]
+  drafts        Draft[]  @relation("CreatedBy")
+  updated_drafts Draft[] @relation("LastUpdatedBy")
+  payments      Payment[]
+  activities    Activity[]
+  conflict_checks ConflictCheck[]
+  time_entries  TimeEntry[]
+  notifications Notification[]
+  trust_transactions TrustTransaction[] @relation("TrustTransactionActor")
+  created_templates Template[] @relation("CreatedTemplates")
+  assigned_tasks  Task[]       @relation("AssignedTasks")
+  created_tasks   Task[]       @relation("CreatedTasks")
+  event_attendances EventAttendee[]
+  expenses_created Expense[]   @relation("ExpenseCreatedBy")
+  outlook_token String? @db.Text
+  outlook_refresh_token String? @db.Text
+  outlook_token_expires DateTime?
+  signature             String? @db.Text
+  generated_forms       GeneratedForm[]
+  email_accounts        EmailAccount[]
+
+  // Verification & Magic link fields
+  email_verified        Boolean  @default(false)
+  invite_token          String?  @unique
+  invite_token_expires  DateTime?
+  magic_link_token      String?  @unique
+  magic_link_expires    DateTime?
+  invite_sent_at        DateTime?
+  invite_send_failed    Boolean  @default(false)
+
+  @@map("users")
+}
+
+model UserRole {
+  id      Int    @id @default(autoincrement())
+  user_id Int
+  role    String
+
+  user    User   @relation("UserRoles", fields: [user_id], references: [id], onDelete: Cascade)
+
+  @@unique([user_id, role])
+  @@map("user_roles")
+}
+
+model Lawyer {
+  id             Int      @id @default(autoincrement())
+  user_id        Int      @unique
+  display_name   String
+  practice_focus String?
+  phone          String?
+  is_active      Boolean  @default(true)
+  created_at     DateTime @default(now())
+  updated_at     DateTime @updatedAt
+
+  user           User     @relation(fields: [user_id], references: [id])
+
+  @@map("lawyers")
+}
+
+model Lead {
+  id                  Int            @id @default(autoincrement())
+  full_name           String
+  email               String
+  phone               String?
+  matter_type         String?
+  practice_area       String?
+  source              String?
+  message             String?        @db.Text
+  status              LeadStatus     @default(new)
+  notes               String?        @db.Text
+  created_by_user_id  Int?
+  converted_client_id Int?
+  created_at          DateTime       @default(now())
+  updated_at          DateTime       @updatedAt
+
+  // Point 3 fields
+  has_court_date       Boolean        @default(false)
+  decline_reason       String?        @db.Text
+  duplicate_of_lead_id Int?
+
+  created_by          User?          @relation("CreatedBy", fields: [created_by_user_id], references: [id])
+  client              Client?        @relation(fields: [converted_client_id], references: [id])
+  lead_documents      LeadDocument[]
+
+  @@map("leads")
+}
+
+model Client {
+  id                Int      @id @default(autoincrement())
+  user_id           Int?     @unique
+  full_name         String
+  email             String
+  phone             String?
+  address_line_1    String?
+  address_line_2    String?
+  city              String?
+  state             String?
+  postal_code       String?
+  notes             String?  @db.Text
+  is_portal_enabled Boolean  @default(false)
+  party_type        String   @default("Individual")
+  party_role        String   @default("Client")
+  organization_name String?
+  contact_first_name String?
+  contact_last_name String?
+  business_address  String?
+  home_address      String?
+  date_of_birth     DateTime?
+  government_id     String?
+  insurance_number  String?
+  status            String   @default("active")
+  opposing_party_name   String?
+  opposing_law_firm     String?
+  opposing_counsel_name String?
+  referral_source       String?
+  referral_detail       String?
+  created_at        DateTime @default(now())
+  updated_at        DateTime @updatedAt
+
+  // Client preferences
+  preferred_language String?
+  preferred_contact  String?
+
+  user              User?    @relation(fields: [user_id], references: [id])
+  leads             Lead[]
+  matters           Matter[]
+  trust_account     TrustAccount?
+  trust_transactions TrustTransaction[]
+  matter_parties    Matter[] @relation("matterparties")
+
+  @@index([created_at])
+  @@map("clients")
+}
+
+model Matter {
+  id                   Int          @id @default(autoincrement())
+  matter_number        String       @unique
+  title                String
+  client_id            Int
+  assigned_lawyer_id   Int?
+  practice_area        String
+  matter_type          String
+  opposing_party_name  String?
+  description          String?      @db.Text
+  status               String       @default("pending")
+  priority             String       @default("medium")
+  opened_at            DateTime?
+  closed_at            DateTime?
+  initial_filing_date  DateTime?
+  date_of_loss         DateTime?
+  sol_term             String?
+  sol_date             DateTime?
+  tracking_type        String?      @default("court")
+  trial_date           DateTime?
+  case_number          String?
+  judge_name           String?
+  court_name           String?
+  court_address        String?
+  court_county         String?
+  court_department     String?
+  court_type           String?      @default("state")
+  federal_court        String?
+  hearing_time         String?
+  case_value           Float?
+  created_by_user_id   Int
+  created_at           DateTime     @default(now())
+  updated_at           DateTime     @updatedAt
+  next_hearing         DateTime?
+  parties_data         Json?
+  vehicles_data        Json?
+  intake_answers       Json?
+
+  // Attorney note
+  client_next_steps    String?      @db.Text
+
+  client               Client       @relation(fields: [client_id], references: [id])
+  assigned_lawyer      User?        @relation("AssignedLawyer", fields: [assigned_lawyer_id], references: [id])
+  created_by           User         @relation("CreatedBy", fields: [created_by_user_id], references: [id])
+  parties              Client[]     @relation("matterparties")
+  
+  documents            Document[]
+  communications       Communication[]
+  invoices             Invoice[]
+  payments             Payment[]
+  drafts               Draft[]
+  activities           Activity[]
+  status_history       MatterStatusHistory[]
+  time_entries         TimeEntry[]
+  calendar_events      CalendarEvent[]
+  folders              Folder[]
+  trust_transactions   TrustTransaction[]
+  tasks                Task[]
+  generated_forms      GeneratedForm[]
+  expenses             Expense[]
+
+  @@index([client_id])
+  @@index([assigned_lawyer_id])
+  @@index([status])
+  @@index([created_at])
+  @@map("matters")
+}
+
+model MatterStatusHistory {
+  id                Int      @id @default(autoincrement())
+  matter_id         Int
+  old_status        String
+  new_status        String
+  changed_by_user_id Int
+  note              String?  @db.Text
+  created_at        DateTime @default(now())
+
+  // Visibility toggle
+  portal_visible     Boolean  @default(false)
+
+  matter            Matter   @relation(fields: [matter_id], references: [id])
+
+  @@map("matter_status_history")
+}
+
+model Document {
+  id                   Int        @id @default(autoincrement())
+  matter_id            Int
+  uploaded_by_user_id  Int
+  file_name            String
+  original_name        String
+  mime_type            String
+  file_path            String
+  file_size            Int
+  visibility           Visibility @default(internal)
+  category             String?
+  folder_path          String?
+  is_signature_required Boolean    @default(false)
+  created_at           DateTime   @default(now())
+  updated_at           DateTime   @updatedAt
+
+  // Document metadata
+  doc_type             String?
+  doc_description      String?    @db.Text
+
+  matter               Matter     @relation(fields: [matter_id], references: [id])
+  uploader             User       @relation(fields: [uploaded_by_user_id], references: [id])
+  folder               Folder?    @relation(fields: [folder_id], references: [id])
+  folder_id            Int?
+
+  @@map("documents")
+}
+
+model LeadDocument {
+  id            Int      @id @default(autoincrement())
+  lead_id       Int
+  lead          Lead     @relation(fields: [lead_id], references: [id])
+  file_name     String
+  original_name String
+  mime_type     String
+  file_path     String   @db.Text
+  file_size     Int
+  doc_type      String?
+  description   String?  @db.Text
+  scan_status   String   @default("pending")
+  quarantined   Boolean  @default(true)
+  created_at    DateTime @default(now())
+
+  @@map("lead_documents")
+}
+
+model Communication {
+  id                 Int               @id @default(autoincrement())
+  matter_id          Int?
+  activity_id        Int?
+  sender_user_id     Int
+  sender_role        Role
+  subject            String?
+  parent_id          Int?
+  message_body       String            @db.Text
+  to                 String?           @db.Text
+  cc                 String?           @db.Text
+  bcc                String?           @db.Text
+  visibility         Visibility        @default(internal)
+  communication_type CommunicationType @default(portal_message)
+  is_read            Boolean          @default(false)
+  read_at            DateTime?
+  request_read_receipt Boolean        @default(false)
+  track_opens          Boolean        @default(false)
+  opened              Boolean        @default(false)
+  opened_time         DateTime?
+  open_count          Int            @default(0)
+
+  // Titan Email Sync Fields
+  folder              String?
+  external_message_id String?
+  external_thread_id  String?
+  in_reply_to         String?
+  references          String?        @db.Text
+  is_starred          Boolean        @default(false)
+  is_flagged          Boolean        @default(false)
+  is_draft            Boolean        @default(false)
+  is_archived         Boolean        @default(false)
+  is_spam             Boolean        @default(false)
+  is_deleted          Boolean        @default(false)
+  sync_status         String?
+  email_account_id    Int?
+
+  created_at         DateTime          @default(now())
+  updated_at         DateTime          @updatedAt
+
+  matter             Matter?           @relation(fields: [matter_id], references: [id])
+  generic_activity   GenericActivity?  @relation(fields: [activity_id], references: [id])
+  sender             User              @relation(fields: [sender_user_id], references: [id])
+  parent             Communication?    @relation("Thread", fields: [parent_id], references: [id])
+  replies            Communication[]   @relation("Thread")
+  email_account      EmailAccount?     @relation(fields: [email_account_id], references: [id])
+
+  @@map("communications")
+}
+
+model EmailAccount {
+  id               Int      @id @default(autoincrement())
+  user_id          Int
+  provider         String
+  email_address    String
+  smtp_host        String?
+  smtp_port        Int?
+  imap_host        String?
+  imap_port        Int?
+  username         String?
+  password         String?  // Store securely if ever used
+  access_token     String?  @db.Text
+  refresh_token    String?  @db.Text
+  sync_status      String?
+  last_sync_at     DateTime?
+  created_at       DateTime @default(now())
+  updated_at       DateTime @updatedAt
+
+  user             User            @relation(fields: [user_id], references: [id])
+  communications   Communication[]
+
+  @@map("email_accounts")
+}
+
+model Invoice {
+  id                 Int           @id @default(autoincrement())
+  matter_id          Int
+  invoice_number     String        @unique
+  description        String?       @db.Text
+  amount             Decimal       @db.Decimal(10, 2)
+  due_date           DateTime?
+  status             InvoiceStatus @default(draft)
+  issued_at          DateTime?
+  sent_at            DateTime?
+  paid_at            DateTime?
+  payment_link       String?
+  pdf_document_id    Int?
+  email_status       String?       // pending, sent, failed
+  email_error        String?
+  created_by_user_id Int
+  created_at         DateTime      @default(now())
+  updated_at         DateTime      @updatedAt
+
+  matter             Matter        @relation(fields: [matter_id], references: [id])
+  created_by         User          @relation(fields: [created_by_user_id], references: [id])
+  items              InvoiceItem[]
+  payments           Payment[]
+
+  @@map("invoices")
+}
+
+model InvoiceItem {
+  id          Int      @id @default(autoincrement())
+  invoice_id  Int
+  description String
+  amount      Decimal  @db.Decimal(10, 2)
+  created_at  DateTime @default(now())
+
+  invoice     Invoice  @relation(fields: [invoice_id], references: [id], onDelete: Cascade)
+
+  @@map("invoice_items")
+}
+
+model Payment {
+  id                 Int      @id @default(autoincrement())
+  invoice_id         Int
+  matter_id          Int
+  amount             Decimal  @db.Decimal(10, 2)
+  payment_method     String?
+  payment_reference  String?
+  paid_on            DateTime @default(now())
+  created_by_user_id Int?
+  created_at         DateTime @default(now())
+  updated_at         DateTime @updatedAt
+
+  invoice            Invoice  @relation(fields: [invoice_id], references: [id])
+  matter             Matter   @relation(fields: [matter_id], references: [id])
+  created_by         User?    @relation(fields: [created_by_user_id], references: [id])
+
+  @@map("payments")
+}
+
+model Draft {
+  id                      Int         @id @default(autoincrement())
+  matter_id               Int
+  title                   String
+  category                String?
+  content                 String?     @db.LongText
+  status                  DraftStatus @default(draft)
+  created_by_user_id      Int
+  last_updated_by_user_id Int?
+  sent_for_signature_at   DateTime?
+  signed_at               DateTime?
+  signed_document_id      Int?
+  created_at              DateTime    @default(now())
+  updated_at              DateTime    @updatedAt
+
+  matter                  Matter      @relation(fields: [matter_id], references: [id])
+  created_by              User        @relation("CreatedBy", fields: [created_by_user_id], references: [id])
+  last_updated_by         User?       @relation("LastUpdatedBy", fields: [last_updated_by_user_id], references: [id])
+  signatures              Signature[]
+  signature_requests      SignatureRequest[]
+
+  @@map("drafts")
+}
+
+model SignatureRequest {
+  id              Int       @id @default(autoincrement())
+  draft_id        Int
+  token           String    @unique
+  recipient_email String
+  status          String    @default("pending")
+  expires_at      DateTime
+  completed_at    DateTime?
+  created_at      DateTime  @default(now())
+  updated_at      DateTime  @updatedAt
+
+  draft           Draft     @relation(fields: [draft_id], references: [id], onDelete: Cascade)
+
+  @@map("signature_requests")
+}
+
+model Signature {
+  id                Int      @id @default(autoincrement())
+  draft_id          Int
+  signed_by_user_id Int
+  signature_data    String?  @db.LongText
+  signed_at         DateTime @default(now())
+  ip_address        String?
+  device_info       String?
+  created_at        DateTime @default(now())
+
+  draft             Draft    @relation(fields: [draft_id], references: [id])
+
+  @@map("signatures")
+}
+
+model Template {
+  id                  Int      @id @default(autoincrement())
+  title               String
+  content             String?  @db.LongText
+  category            String?  @default("court_form")
+  practice_area       String?
+  matter_type         String?
+  created_by_user_id  Int
+  created_at          DateTime @default(now())
+  updated_at          DateTime @updatedAt
+  description         String?  @db.Text
+  is_active           Boolean  @default(true)
+
+  created_by          User     @relation("CreatedTemplates", fields: [created_by_user_id], references: [id])
+
+  @@map("templates")
+}
+
+model Activity {
+  id            Int      @id @default(autoincrement())
+  matter_id     Int?
+  actor_user_id Int?
+  entity_type   String
+  entity_id     Int
+  action        String
+  description   String?  @db.Text
+  created_at    DateTime @default(now())
+
+  matter        Matter?  @relation(fields: [matter_id], references: [id])
+  actor         User?    @relation(fields: [actor_user_id], references: [id])
+
+  @@map("activities")
+}
+
+model ConflictCheck {
+  id                      Int      @id @default(autoincrement())
+  prospective_client_name String
+  opposing_party_name     String
+  result                  String   // conflict / no_conflict
+  matches                 Json?    // stores matched entities
+  created_by_user_id      Int
+  created_at              DateTime @default(now())
+
+  created_by              User     @relation(fields: [created_by_user_id], references: [id])
+
+  @@map("conflict_checks")
+}
+
+model TimeEntry {
+  id                 Int       @id @default(autoincrement())
+  matter_id          Int
+  user_id            Int
+  start_time         DateTime  @default(now())
+  end_time           DateTime?
+  duration_minutes   Int?
+  is_running         Boolean   @default(true)
+  created_at         DateTime  @default(now())
+
+  matter             Matter    @relation(fields: [matter_id], references: [id])
+  user               User      @relation(fields: [user_id], references: [id])
+
+  @@map("time_entries")
+}
+
+model Setting {
+  id        Int      @id @default(autoincrement())
+  key       String   @unique
+  value     String
+  updated_at DateTime @updatedAt
+
+  @@map("settings")
+}
+
+model Report {
+  id           Int      @id @default(autoincrement())
+  title        String
+  category     String?
+  start_date   DateTime
+  end_date     DateTime
+  data         Json
+  created_by   Int?
+  created_at   DateTime @default(now())
+
+  @@map("reports")
+}
+
+model CalendarEvent {
+  id              Int      @id @default(autoincrement())
+  title           String
+  event_date      DateTime
+  end_date        DateTime?
+  matter_id       Int?
+  activity_id     Int?
+  type            String   // hearing, meeting, deadline, court_date, trial, consultation, general
+  description     String?  @db.Text
+  reminder_date   DateTime?
+  reminder_sent   Boolean  @default(false)
+  court_related   Boolean  @default(false)
+  event_status    String?  @default("scheduled")
+  titan_event_id  String?
+  created_by      Int
+  created_at      DateTime @default(now())
+  appearance_type String?  // hearing, trial, motion, mediation, conference
+  court_name      String?
+  court_room      String?
+  judge_name      String?
+  is_court_event  Boolean  @default(false)
+  reminder_sent_7d       Boolean  @default(false)
+  reminder_sent_3d       Boolean  @default(false)
+  reminder_sent_1d       Boolean  @default(false)
+  reminder_sent_same_day Boolean  @default(false)
+  create_task            Boolean  @default(false)
+  outlook_event_id String?
+  outlook_series_id String?
+  recurrence_rule String?
+  busy_status     String?
+  categories      Json?
+  location        String?
+  is_all_day      Boolean  @default(false)
+  timezone        String?
+  importance      String?  @default("normal")
+  is_online_meeting Boolean @default(false)
+  attachments     Json?
+
+  matter          Matter?  @relation(fields: [matter_id], references: [id])
+  generic_activity GenericActivity? @relation(fields: [activity_id], references: [id])
+  attendees       EventAttendee[]
+
+  @@map("calendar_events")
+}
+
+model Folder {
+  id          Int        @id @default(autoincrement())
+  name        String
+  matter_id   Int?
+  created_at  DateTime   @default(now())
+
+  matter      Matter?    @relation(fields: [matter_id], references: [id])
+  documents   Document[]
+
+  @@map("folders")
+}
+
+model Notification {
+  id           Int      @id @default(autoincrement())
+  user_id      Int
+  title        String
+  message      String
+  type         String // document, deadline, client, system
+  reference_id Int? // matter_id, document_id, etc
+  is_read      Boolean  @default(false)
+  created_at   DateTime @default(now())
+
+  user User @relation(fields: [user_id], references: [id])
+
+  @@map("notifications")
+}
+
+model TrustAccount {
+  id         Int      @id @default(autoincrement())
+  client_id  Int      @unique
+  balance    Decimal  @db.Decimal(10, 2) @default(0)
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+
+  client     Client   @relation(fields: [client_id], references: [id])
+  transactions TrustTransaction[]
+
+  @@map("trust_accounts")
+}
+
+model TrustTransaction {
+  id                 Int                  @id @default(autoincrement())
+  trust_account_id   Int
+  matter_id          Int?
+  client_id          Int
+  transaction_type   TrustTransactionType
+  amount             Decimal              @db.Decimal(10, 2)
+  reference          String?
+  notes              String?              @db.Text
+  created_by_user_id Int
+  created_at         DateTime             @default(now())
+
+  trust_account      TrustAccount         @relation(fields: [trust_account_id], references: [id])
+  matter             Matter?              @relation(fields: [matter_id], references: [id])
+  client             Client               @relation(fields: [client_id], references: [id])
+  created_by         User                 @relation("TrustTransactionActor", fields: [created_by_user_id], references: [id])
+
+  @@map("trust_transactions")
+}
+
+
+model SocialLink {
+  id        Int            @id @default(autoincrement())
+  platform  SocialPlatform @unique
+  url       String?
+  updated_at DateTime       @updatedAt
+
+  @@map("social_links")
+}
+
+enum SocialPlatform {
+  LinkedIn
+  Instagram
+  Facebook
+  YouTube
+}
+
+model PracticeArea {
+  id          Int      @id @default(autoincrement())
+  name        String   @unique
+  is_active   Boolean  @default(true)
+  created_at  DateTime @default(now())
+  updated_at  DateTime @updatedAt
+
+  @@map("practice_areas")
+}
+
+model CustomFieldDefinition {
+  id          Int      @id @default(autoincrement())
+  name        String
+  type        String   
+  options     Json?    
+  is_active   Boolean  @default(true)
+  created_at  DateTime @default(now())
+  updated_at  DateTime @updatedAt
+
+  values      MatterCustomFieldValue[]
+
+  @@map("custom_field_definitions")
+}
+
+model MatterCustomFieldValue {
+  id                  Int      @id @default(autoincrement())
+  matter_id           Int
+  field_definition_id Int
+  value               String?  @db.Text
+  created_at          DateTime @default(now())
+  updated_at          DateTime @updatedAt
+
+  field_definition    CustomFieldDefinition @relation(fields: [field_definition_id], references: [id], onDelete: Cascade)
+
+  @@unique([matter_id, field_definition_id])
+  @@map("matter_custom_field_values")
+}
+
+model DocumentCategory {
+  id          Int      @id @default(autoincrement())
+  name        String   @unique
+  is_active   Boolean  @default(true)
+  created_at  DateTime @default(now())
+  updated_at  DateTime @updatedAt
+
+  @@map("document_categories")
+}
+
+model CompanyProfile {
+  id              Int      @id @default(autoincrement())
+
+  company_name    String?
+  address         String?
+  phone           String?
+  email           String?
+  website         String?
+
+  logo_url        String?
+  letterhead_url  String?
+
+  created_at      DateTime @default(now())
+  updated_at      DateTime @updatedAt
+
+  @@map("company_profile")
+}
+
+model Task {
+  id                 Int       @id @default(autoincrement())
+  title              String
+  description        String?   @db.Text
+  priority           String    @default("medium") // high, medium, low
+  status             String    @default("open")   // open, completed
+  task_type          String?   @default("general")
+  assigned_user_id   Int?
+  matter_id          Int?
+  activity_id        Int?
+  due_date           DateTime?
+  completed_at       DateTime?
+  reminder_date      DateTime?
+  reminder_sent      Boolean   @default(false)
+  created_by_user_id Int
+  created_at         DateTime  @default(now())
+  updated_at         DateTime  @updatedAt
+
+  assigned_user      User?     @relation("AssignedTasks", fields: [assigned_user_id], references: [id])
+  created_by         User      @relation("CreatedTasks", fields: [created_by_user_id], references: [id])
+  matter             Matter?   @relation(fields: [matter_id], references: [id])
+  generic_activity   GenericActivity? @relation(fields: [activity_id], references: [id])
+
+  @@map("tasks")
+}
+
+model GenericActivity {
+  id          Int      @id @default(autoincrement())
+  title       String
+  type        String
+  description String?  @db.Text
+  status      String?  @default("Open")
+  created_by  Int?
+  created_at  DateTime @default(now())
+  updated_at  DateTime @updatedAt
+
+  tasks          Task[]
+  events         CalendarEvent[]
+  communications Communication[]
+
+  @@map("generic_activities")
+}
+
+model EventAttendee {
+  id          Int      @id @default(autoincrement())
+  event_id    Int
+  user_id     Int?     
+  email       String?  
+  status      String   @default("pending") 
+  is_optional Boolean  @default(false)
+  created_at  DateTime @default(now())
+
+  event      CalendarEvent @relation(fields: [event_id], references: [id], onDelete: Cascade)
+  user       User?         @relation(fields: [user_id], references: [id], onDelete: Cascade)
+
+  @@map("event_attendees")
+}
+
+model CalendarCategory {
+  id         Int      @id @default(autoincrement())
+  name       String   @unique
+  color      String
+  is_active  Boolean  @default(true)
+  sort_order Int      @default(0)
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+
+  @@map("calendar_categories")
+}
+
+model CourtFormTemplate {
+  id            Int                     @id @default(autoincrement())
+  form_number   String                  @unique
+  title         String
+  practice_area String?
+  pdf_path      String?
+  is_active     Boolean                 @default(true)
+  created_at    DateTime                @default(now())
+  mappings      CourtFormMapping[]
+  field_mappings CourtFormFieldMapping[] @relation("FieldMappings")
+  drafts        GeneratedForm[]
+
+  @@map("court_form_templates")
+}
+
+model CourtFormMapping {
+  id                Int               @id @default(autoincrement())
+  template_id       Int
+  pdf_field_name    String
+  system_field_path String
+  created_at        DateTime          @default(now())
+
+  template          CourtFormTemplate @relation(fields: [template_id], references: [id], onDelete: Cascade)
+
+  @@unique([template_id, pdf_field_name])
+  @@map("court_form_mappings")
+}
+
+model CourtFormFieldMapping {
+  id                Int               @id @default(autoincrement())
+  template_id       Int
+  field_name        String
+  page_number       Int
+  x_position        Float
+  y_position        Float
+  font_size         Float             @default(10)
+  system_field_path String
+  created_at        DateTime          @default(now())
+  updated_at        DateTime          @updatedAt
+
+  template          CourtFormTemplate @relation("FieldMappings", fields: [template_id], references: [id], onDelete: Cascade)
+
+  @@map("court_form_field_mappings")
+}
+
+model GeneratedForm {
+  id            Int               @id @default(autoincrement())
+  template_id   Int
+  matter_id     Int
+  form_data     Json
+  pdf_file_name String?
+  status        String            @default("draft") // "draft", "filed"
+  created_by    Int
+  created_at    DateTime          @default(now())
+  updated_at    DateTime          @updatedAt
+
+  template      CourtFormTemplate @relation(fields: [template_id], references: [id], onDelete: Cascade)
+  matter        Matter            @relation(fields: [matter_id], references: [id], onDelete: Cascade)
+  creator       User              @relation(fields: [created_by], references: [id])
+
+  @@map("generated_forms")
+}
+
+model Expense {
+  id              Int       @id @default(autoincrement())
+  vendor          String
+  matter_id       Int?
+  category        String    @default("General")
+  amount          Float
+  date            DateTime  @default(now())
+  status          String    @default("approved")
+  description     String?   @db.Text
+  created_by_id   Int?
+  created_at      DateTime  @default(now())
+  updated_at      DateTime  @updatedAt
+
+  matter          Matter?   @relation(fields: [matter_id], references: [id], onDelete: SetNull)
+  created_by      User?     @relation("ExpenseCreatedBy", fields: [created_by_id], references: [id], onDelete: SetNull)
+
+  @@index([matter_id])
+  @@index([created_at])
+  @@map("expenses")
+}
+
+model IntakeModuleDefinition {
+  id             Int                          @id @default(autoincrement())
+  key            String                       @unique
+  title          String
+  description    String?                      @db.Text
+  icon           String                       @default("📋")
+  category       String                       @default("General")
+  is_core        Boolean                      @default(false)
+  is_enabled     Boolean                      @default(true)
+  display_order  Int                          @default(0)
+  practice_area  String                       @default("All")
+  created_at     DateTime                     @default(now())
+  updated_at     DateTime                     @updatedAt
+
+  fields         IntakeModuleFieldDefinition[]
+
+  @@map("intake_module_definitions")
+}
+
+model IntakeModuleFieldDefinition {
+  id             Int                    @id @default(autoincrement())
+  module_id      Int
+  field_key      String
+  field_label    String
+  field_type     String                 // text, textarea, number, date, checkbox, radio, select, multiselect, file
+  placeholder    String?
+  default_value  String?                @db.Text
+  help_text      String?
+  options        Json?                  // array of option strings
+  is_required    Boolean                @default(false)
+  min_length     Int?
+  max_length     Int?
+  min_value      Float?
+  max_value      Float?
+  display_order  Int                    @default(0)
+  created_at     DateTime               @default(now())
+  updated_at     DateTime               @updatedAt
+
+  module         IntakeModuleDefinition @relation(fields: [module_id], references: [id], onDelete: Cascade)
+
+  @@map("intake_module_field_definitions")
+}
+
+model MatterCommunication {
+  id                 Int      @id @default(autoincrement())
+  matter_id          Int
+  type               String?  @default("Note") @db.VarChar(50)
+  subject            String   @db.VarChar(255)
+  description        String?  @db.LongText
+  communication_date DateTime @default(now())
+  contact_id         Int?
+  document_ids       Json?
+  created_by         Int?
+  created_at         DateTime @default(now())
+  updated_at         DateTime @updatedAt
+
+  @@index([matter_id], map: "idx_matter")
+  @@index([type], map: "idx_type")
+  @@index([contact_id], map: "idx_contact")
+  @@index([communication_date], map: "idx_comm_date")
+  @@map("matter_communications")
+}
+
+model TeamChatMessage {
+  id         Int      @id @default(autoincrement())
+  user_id    Int
+  channel    String   @default("general") @db.VarChar(100)
+  message    String   @db.Text
+  is_deleted Boolean  @default(false)
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+
+  @@index([channel], map: "idx_chat_channel")
+  @@index([created_at], map: "idx_chat_created")
+  @@map("team_chat_messages")
+}
+
+model ESignatureRequest {
+  id                    Int       @id @default(autoincrement())
+  document_id           Int?
+  matter_id             Int?
+  client_id             Int?
+  signer_name           String    @db.VarChar(255)
+  signer_email          String    @db.VarChar(255)
+  title                 String    @db.VarChar(255)
+  provider              String    @default("native") @db.VarChar(50) // native, digisigner, adobesign
+  status                String    @default("pending") @db.VarChar(50) // pending, sent, viewed, signed, declined
+  external_id           String?   @db.VarChar(255)
+  signature_url         String?   @db.Text
+  signed_at             DateTime?
+  created_by            Int?
+  created_at            DateTime  @default(now())
+  updated_at            DateTime  @updatedAt
+
+  @@index([matter_id], map: "idx_esign_matter")
+  @@index([status], map: "idx_esign_status")
+  @@map("esign_requests")
+}
+
+model PhysicalMailDispatch {
+  id                    Int       @id @default(autoincrement())
+  document_id           Int?
+  matter_id             Int?
+  recipient_name        String    @db.VarChar(255)
+  address_line1         String    @db.VarChar(255)
+  address_line2         String?   @db.VarChar(255)
+  city                  String    @db.VarChar(100)
+  state                 String    @db.VarChar(100)
+  postal_code           String    @db.VarChar(20)
+  mail_type             String    @default("usps_certified") @db.VarChar(50) // usps_certified, usps_first_class, registered
+  provider              String    @default("lob") @db.VarChar(50) // lob, click2mail, adept
+  status                String    @default("queued") @db.VarChar(50) // queued, printed, in_transit, delivered
+  tracking_number       String?   @db.VarChar(100)
+  tracking_url          String?   @db.Text
+  cost                  Float?    @default(0.0)
+  created_by            Int?
+  created_at            DateTime  @default(now())
+  updated_at            DateTime  @updatedAt
+
+  @@index([matter_id], map: "idx_mail_matter")
+  @@index([status], map: "idx_mail_status")
+  @@map("physical_mail_dispatches")
+}
+
+model CourtEFilingSubmission {
+  id                    Int       @id @default(autoincrement())
+  matter_id             Int?
+  generated_form_id     Int?
+  court_name            String    @db.VarChar(255)
+  case_number           String?   @db.VarChar(100)
+  efsp_provider         String    @default("journal_tech") @db.VarChar(50) // journal_tech, trellis, legalconnect
+  status                String    @default("draft") @db.VarChar(50) // draft, submitted, accepted, rejected, stamped
+  envelope_id           String?   @db.VarChar(255)
+  confirmation_number   String?   @db.VarChar(255)
+  stamped_document_url  String?   @db.Text
+  filing_fee            Float?    @default(0.0)
+  created_by            Int?
+  created_at            DateTime  @default(now())
+  updated_at            DateTime  @updatedAt
+
+  @@index([matter_id], map: "idx_efile_matter")
+  @@index([status], map: "idx_efile_status")
+  @@map("court_efiling_submissions")
+}
+

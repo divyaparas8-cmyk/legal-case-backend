@@ -1,0 +1,78 @@
+const service = require('./templates.service');
+const { sendResponse } = require('../../utils/response');
+
+const getAll = async (req, res, next) => {
+  try {
+    const data = await service.getAll(req.query, req.user);
+    res.status(200).json(sendResponse(true, 'Templates fetched successfully', data));
+  } catch (err) {
+    next(err);
+  }
+};
+
+const getById = async (req, res, next) => {
+  try {
+    const data = await service.getById(req.params.id, req.user);
+    res.status(200).json(sendResponse(true, 'Template fetched successfully', data));
+  } catch (err) {
+    next(err);
+  }
+};
+
+const create = async (req, res, next) => {
+  try {
+    const data = await service.create(req.body, req.user);
+    res.status(201).json(sendResponse(true, 'Template created successfully', data));
+  } catch (err) {
+    next(err);
+  }
+};
+
+const update = async (req, res, next) => {
+  try {
+    const data = await service.update(req.params.id, req.body, req.user);
+    res.status(200).json(sendResponse(true, 'Template updated successfully', data));
+  } catch (err) {
+    next(err);
+  }
+};
+
+const remove = async (req, res, next) => {
+  try {
+    await service.remove(req.params.id, req.user);
+    res.status(200).json(sendResponse(true, 'Template deleted successfully'));
+  } catch (err) {
+    next(err);
+  }
+};
+
+const cloneToMatter = async (req, res, next) => {
+  try {
+    const { template_id, templateId, id, matter_id, matterId, title, content, category } = req.body;
+    const targetTemplateId = template_id || templateId || id;
+    const targetMatterId = matter_id || matterId;
+    const data = await service.cloneToMatter(targetTemplateId, targetMatterId, req.user, { title, content, category });
+    res.status(200).json(sendResponse(true, 'Template cloned successfully', data));
+  } catch (err) {
+    next(err);
+  }
+};
+
+const duplicate = async (req, res, next) => {
+  try {
+    const data = await service.duplicate(req.params.id, req.user);
+    res.status(200).json(sendResponse(true, 'Template duplicated successfully', data));
+  } catch (err) {
+    next(err);
+  }
+};
+
+module.exports = {
+  getAll,
+  getById,
+  create,
+  update,
+  remove,
+  cloneToMatter,
+  duplicate
+};
