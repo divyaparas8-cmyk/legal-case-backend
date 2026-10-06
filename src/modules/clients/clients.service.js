@@ -202,22 +202,83 @@ const remove = async (id, user) => {
   return await prisma.$transaction(async (tx) => {
     const matterIds = (client.matters || []).map(m => m.id);
     if (matterIds.length > 0) {
+      // 1. Unlink from _matterparties join table
+      await tx.$executeRawUnsafe(
+        `DELETE FROM _matterparties WHERE A = ${clientId} OR B IN (${matterIds.join(',')})`
+      ).catch(() => {});
+
+      // 2. Invoices & items & payments
+      const invoices = await tx.invoice.findMany({
+        where: { matter_id: { in: matterIds } },
+        select: { id: true }
+      }).catch(() => []);
+      const invoiceIds = invoices.map(i => i.id);
+      if (invoiceIds.length > 0) {
+        await tx.payment.deleteMany({ where: { invoice_id: { in: invoiceIds } } }).catch(() => {});
+        await tx.invoiceItem.deleteMany({ where: { invoice_id: { in: invoiceIds } } }).catch(() => {});
+      }
       await tx.payment.deleteMany({ where: { matter_id: { in: matterIds } } }).catch(() => {});
-      await tx.invoiceItem.deleteMany({ where: { invoice: { matter_id: { in: matterIds } } } }).catch(() => {});
       await tx.invoice.deleteMany({ where: { matter_id: { in: matterIds } } }).catch(() => {});
+
+      // 3. Drafts, signatures, signature requests
+      const drafts = await tx.draft.findMany({
+        where: { matter_id: { in: matterIds } },
+        select: { id: true }
+      }).catch(() => []);
+      const draftIds = drafts.map(d => d.id);
+      if (draftIds.length > 0) {
+        await tx.signature.deleteMany({ where: { draft_id: { in: draftIds } } }).catch(() => {});
+        await tx.signatureRequest.deleteMany({ where: { draft_id: { in: draftIds } } }).catch(() => {});
+        await tx.draft.deleteMany({ where: { id: { in: draftIds } } }).catch(() => {});
+      }
+
+      // 4. Generated forms & court filings
+      await tx.courtEFilingSubmission.deleteMany({ where: { matter_id: { in: matterIds } } }).catch(() => {});
+      await tx.generatedForm.deleteMany({ where: { matter_id: { in: matterIds } } }).catch(() => {});
+
+      // 5. Calendar events & attendees
+      const calEvents = await tx.calendarEvent.findMany({
+        where: { matter_id: { in: matterIds } },
+        select: { id: true }
+      }).catch(() => []);
+      const eventIds = calEvents.map(e => e.id);
+      if (eventIds.length > 0) {
+        await tx.eventAttendee.deleteMany({ where: { event_id: { in: eventIds } } }).catch(() => {});
+        await tx.calendarEvent.deleteMany({ where: { id: { in: eventIds } } }).catch(() => {});
+      }
+
+      // 6. Documents & folders
+      await tx.document.deleteMany({ where: { matter_id: { in: matterIds } } }).catch(() => {});
+      await tx.folder.deleteMany({ where: { matter_id: { in: matterIds } } }).catch(() => {});
+
+      // 7. Time entries, expenses, tasks, activities, communications
       await tx.timeEntry.deleteMany({ where: { matter_id: { in: matterIds } } }).catch(() => {});
       await tx.expense.deleteMany({ where: { matter_id: { in: matterIds } } }).catch(() => {});
       await tx.communication.deleteMany({ where: { matter_id: { in: matterIds } } }).catch(() => {});
-      await tx.document.deleteMany({ where: { matter_id: { in: matterIds } } }).catch(() => {});
+      await tx.matterCommunication.deleteMany({ where: { matter_id: { in: matterIds } } }).catch(() => {});
       await tx.task.deleteMany({ where: { matter_id: { in: matterIds } } }).catch(() => {});
       await tx.activity.deleteMany({ where: { matter_id: { in: matterIds } } }).catch(() => {});
-      await tx.calendarEvent.deleteMany({ where: { matter_id: { in: matterIds } } }).catch(() => {});
+
+      // 8. E-signatures & physical mail
+      await tx.eSignatureRequest.deleteMany({ where: { matter_id: { in: matterIds } } }).catch(() => {});
+      await tx.physicalMailDispatch.deleteMany({ where: { matter_id: { in: matterIds } } }).catch(() => {});
+
+      // 9. Trust transactions, status history, custom fields
       await tx.trustTransaction.deleteMany({ where: { matter_id: { in: matterIds } } }).catch(() => {});
       await tx.matterStatusHistory.deleteMany({ where: { matter_id: { in: matterIds } } }).catch(() => {});
       await tx.matterCustomFieldValue.deleteMany({ where: { matter_id: { in: matterIds } } }).catch(() => {});
-      await tx.matter.deleteMany({ where: { id: { in: matterIds } } }).catch(() => {});
+
+      // 10. Delete matters
+      await tx.matter.deleteMany({ where: { id: { in: matterIds } } });
     }
 
+    // Clean remaining join table entries for this client
+    await tx.$executeRawUnsafe(
+      `DELETE FROM _matterparties WHERE A = ${clientId}`
+    ).catch(() => {});
+
+    // Clean direct client references
+    await tx.eSignatureRequest.deleteMany({ where: { client_id: clientId } }).catch(() => {});
     await tx.trustTransaction.deleteMany({ where: { client_id: clientId } }).catch(() => {});
     await tx.trustAccount.deleteMany({ where: { client_id: clientId } }).catch(() => {});
     await tx.lead.updateMany({
@@ -241,6 +302,9 @@ const remove = async (id, user) => {
     }
 
     return deletedClient;
+  }, {
+    maxWait: 20000,
+    timeout: 60000
   });
 };
 
