@@ -53,7 +53,7 @@ app.get('/api/health', (req, res) => {
   res.status(200).json({
     status: 'OK',
     message: 'VkTori Legal Backend is running',
-    version: '1.2.0-timezone-fix',
+    version: '1.3.0-titan-sync',
     timezone: 'America/Los_Angeles',
     commit: process.env.RAILWAY_GIT_COMMIT_SHA || 'deployed'
   });
