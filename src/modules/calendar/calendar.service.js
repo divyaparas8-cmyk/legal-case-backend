@@ -1,6 +1,12 @@
-const { PrismaClient } = require('@prisma/client');
-const prisma = new PrismaClient();
+const prisma = require('../../config/db');
 const notificationsService = require('../notifications/notifications.service');
+const {
+  pacificToUTC,
+  utcToPacific,
+  getPacificParts,
+  parseCalendarEventDate,
+  PACIFIC_TIMEZONE
+} = require('../../utils/dateUtils');
 
 exports.getAllEvents = async () => {
   const events = [];
@@ -21,7 +27,8 @@ exports.getAllEvents = async () => {
       amount: i.amount,
       status: i.status,
       description: i.description,
-      raw_id: i.id
+      raw_id: i.id,
+      timezone: PACIFIC_TIMEZONE
     });
   });
 
@@ -40,7 +47,8 @@ exports.getAllEvents = async () => {
       matter_id: m.id,
       matter_number: m.matter_number,
       description: m.description,
-      raw_id: m.id
+      raw_id: m.id,
+      timezone: PACIFIC_TIMEZONE
     });
   });
 
@@ -80,9 +88,10 @@ exports.getAllEvents = async () => {
       categories: e.categories,
       location: e.location,
       is_all_day: e.is_all_day,
-      timezone: e.timezone,
+      timezone: e.timezone || PACIFIC_TIMEZONE,
       attachments: e.attachments,
-      importance: e.importance
+      importance: e.importance,
+      titan_event_id: e.titan_event_id
     });
   });
 
@@ -90,13 +99,8 @@ exports.getAllEvents = async () => {
 };
 
 exports.createEvent = async (userId, body) => {
-  let eventDate = new Date(body.date || new Date());
-  
-  if (body.time) {
-    const [hours, minutes] = body.time.split(':');
-    eventDate.setHours(parseInt(hours, 10));
-    eventDate.setMinutes(parseInt(minutes, 10));
-  }
+  const eventDate = parseCalendarEventDate(body.date, body.time, '00:00:00') || new Date();
+  const endDate = body.end_date ? parseCalendarEventDate(body.end_date, null, '23:59:59') : null;
 
   const type = body.type || 'general';
   const courtRelatedTypes = ['court_date', 'hearing', 'trial', 'filing_deadline', 'motion', 'mediation', 'conference'];
@@ -105,8 +109,8 @@ exports.createEvent = async (userId, body) => {
   const eventData = {
     title: body.title,
     event_date: eventDate,
-    end_date: body.end_date ? new Date(body.end_date) : null,
-    reminder_date: body.reminder_date ? new Date(body.reminder_date) : null,
+    end_date: endDate,
+    reminder_date: body.reminder_date ? parseCalendarEventDate(body.reminder_date) : null,
     event_status: body.event_status || 'scheduled',
     court_related: isCourtRelated,
     matter_id: body.matter_id ? Number(body.matter_id) : null,
@@ -125,7 +129,7 @@ exports.createEvent = async (userId, body) => {
     categories: body.categories ? (typeof body.categories === 'string' ? JSON.parse(body.categories) : body.categories) : null,
     location: body.location || null,
     is_all_day: body.is_all_day === true || body.is_all_day === 'true',
-    timezone: body.timezone || 'UTC',
+    timezone: body.timezone || PACIFIC_TIMEZONE,
     attachments: body.attachments ? (typeof body.attachments === 'string' ? JSON.parse(body.attachments) : body.attachments) : null,
     importance: body.importance || 'normal'
   };
@@ -195,6 +199,14 @@ exports.createEvent = async (userId, body) => {
   const outlookService = require('./outlook.service');
   await outlookService.createEvent(userId, event);
 
+  // Titan Calendar Hook
+  const titanCalendarService = require('../settings/titan-calendar.service');
+  const titanSyncRes = await titanCalendarService.syncEvent(event);
+  if (titanSyncRes && titanSyncRes.titan_event_id) {
+    event.titan_event_id = titanSyncRes.titan_event_id;
+  }
+
+
   if (event.matter_id && (event.type === 'hearing' || event.type === 'deadline' || event.type === 'filing_deadline')) {
     const matter = await prisma.matter.findUnique({
       where: { id: event.matter_id },
@@ -222,10 +234,23 @@ exports.createEvent = async (userId, body) => {
           reference_id: event.id
         });
       } else if (attendee.email) {
-        // Prepare backend for future email invitation sending.
-        // E.g., emailService.sendCalendarInvite(attendee.email, event);
-        console.log(`[Calendar] Invitation pending for external attendee: ${attendee.email}. Email provider not configured.`);
+        const titanEmailService = require('../../services/email/titanEmail.service');
+        if (titanEmailService.isConfigured()) {
+          try {
+            await titanEmailService.sendSystemEmail({
+              to: attendee.email,
+              subject: `Calendar Invitation: ${event.title}`,
+              html: `<p>You have been invited to an upcoming event:</p><p><strong>Event:</strong> ${event.title}</p><p><strong>Date & Time:</strong> ${event.event_date.toLocaleString()}</p>${event.location ? `<p><strong>Location:</strong> ${event.location}</p>` : ''}${event.description ? `<p><strong>Details:</strong><br/>${event.description}</p>` : ''}`,
+            });
+            console.log(`[Calendar] Invitation dispatched to external attendee: ${attendee.email} via Titan Mail.`);
+          } catch (invErr) {
+            console.error(`[Calendar] Failed to send email invite to ${attendee.email}:`, invErr.message);
+          }
+        } else {
+          console.log(`[Calendar] Invitation pending for external attendee: ${attendee.email}. Titan email provider not configured in environment.`);
+        }
       }
+
     }
   }
 
@@ -254,17 +279,19 @@ exports.syncMatterDates = async (matter, userId) => {
         where: { matter_id: matter.id, type: dateInfo.type }
       });
 
+      const parsedDate = parseCalendarEventDate(matter[dateInfo.field], '09:00:00');
       if (existing) {
-        if (existing.event_date.getTime() !== new Date(matter[dateInfo.field]).getTime()) {
+        if (parsedDate && existing.event_date.getTime() !== parsedDate.getTime()) {
           await prisma.calendarEvent.update({
             where: { id: existing.id },
-            data: { event_date: new Date(matter[dateInfo.field]) }
+            data: { event_date: parsedDate }
           });
         }
       } else {
         await exports.createEvent(userId, {
           title: dateInfo.title,
           date: matter[dateInfo.field],
+          time: '09:00',
           matter_id: matter.id,
           type: dateInfo.type,
           description: `Auto-synced from matter ${matter.matter_number}`,
@@ -284,11 +311,15 @@ exports.updateEvent = async (userId, id, body) => {
   });
   if (!existing) throw new Error('Event not found');
 
-  let eventDate = new Date(body.date || existing.event_date);
-  if (body.time) {
-    const [hours, minutes] = body.time.split(':');
-    eventDate.setHours(parseInt(hours, 10));
-    eventDate.setMinutes(parseInt(minutes, 10));
+  let eventDate = existing.event_date;
+  if (body.date !== undefined || body.time !== undefined) {
+    const baseDate = body.date !== undefined ? body.date : existing.event_date;
+    eventDate = parseCalendarEventDate(baseDate, body.time, '00:00:00') || existing.event_date;
+  }
+
+  let endDate = existing.end_date;
+  if (body.end_date !== undefined) {
+    endDate = body.end_date ? parseCalendarEventDate(body.end_date, null, '23:59:59') : null;
   }
 
   const type = body.type || existing.type;
@@ -298,8 +329,8 @@ exports.updateEvent = async (userId, id, body) => {
   const eventData = {
     title: body.title !== undefined ? body.title : existing.title,
     event_date: eventDate,
-    end_date: body.end_date !== undefined ? (body.end_date ? new Date(body.end_date) : null) : existing.end_date,
-    reminder_date: body.reminder_date !== undefined ? (body.reminder_date ? new Date(body.reminder_date) : null) : existing.reminder_date,
+    end_date: endDate,
+    reminder_date: body.reminder_date !== undefined ? (body.reminder_date ? parseCalendarEventDate(body.reminder_date) : null) : existing.reminder_date,
     event_status: body.event_status !== undefined ? body.event_status : existing.event_status,
     court_related: isCourtRelated,
     matter_id: body.matter_id !== undefined ? (body.matter_id ? Number(body.matter_id) : null) : existing.matter_id,
@@ -317,7 +348,7 @@ exports.updateEvent = async (userId, id, body) => {
     categories: body.categories !== undefined ? (body.categories ? (typeof body.categories === 'string' ? JSON.parse(body.categories) : body.categories) : null) : existing.categories,
     location: body.location !== undefined ? body.location : existing.location,
     is_all_day: body.is_all_day !== undefined ? (body.is_all_day === true || body.is_all_day === 'true') : existing.is_all_day,
-    timezone: body.timezone !== undefined ? body.timezone : existing.timezone,
+    timezone: body.timezone !== undefined ? body.timezone : (existing.timezone || PACIFIC_TIMEZONE),
     attachments: body.attachments !== undefined ? (body.attachments ? (typeof body.attachments === 'string' ? JSON.parse(body.attachments) : body.attachments) : null) : existing.attachments,
     importance: body.importance !== undefined ? body.importance : existing.importance
   };
@@ -349,6 +380,13 @@ exports.updateEvent = async (userId, id, body) => {
     await outlookService.createEvent(userId, updatedEvent);
   }
 
+  // Titan Calendar Hook
+  const titanCalendarService = require('../settings/titan-calendar.service');
+  const titanSyncRes = await titanCalendarService.syncEvent(updatedEvent);
+  if (titanSyncRes && titanSyncRes.titan_event_id) {
+    updatedEvent.titan_event_id = titanSyncRes.titan_event_id;
+  }
+
   return updatedEvent;
 };
 
@@ -364,10 +402,15 @@ exports.deleteEvent = async (userId, id) => {
     await outlookService.deleteEvent(userId, existing.outlook_event_id);
   }
 
+  // Titan Calendar Hook
+  const titanCalendarService = require('../settings/titan-calendar.service');
+  await titanCalendarService.deleteEvent(eventId);
+
   await prisma.calendarEvent.delete({
     where: { id: eventId }
   });
 };
+
 
 exports.getAllCategories = async (query = {}) => {
   const includeInactive = query.include_inactive === 'true' || query.include_inactive === true;

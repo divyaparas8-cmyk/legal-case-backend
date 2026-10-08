@@ -35,12 +35,33 @@ async function ensureTableExists() {
   }
 }
 
+function validateId(val, fieldName = 'ID') {
+  const num = Number(val);
+  if (!Number.isInteger(num) || isNaN(num) || num <= 0) {
+    const err = new Error(`Invalid ${fieldName}.`);
+    err.statusCode = 400;
+    throw err;
+  }
+  return num;
+}
+
 /**
  * Calculate automated financial totals from Matter JSON objects (parties_data & vehicles_data)
  */
 async function calculateAutomatedTotals(matterId) {
+  const mId = Number(matterId);
+  if (!Number.isInteger(mId) || isNaN(mId) || mId <= 0) {
+    return {
+      medical_expenses: 0,
+      lost_wages: 0,
+      property_damage: 0,
+      vehicle_repair_cost: 0,
+      insurance_limits: 0
+    };
+  }
+
   const matter = await prisma.matter.findUnique({
-    where: { id: parseInt(matterId, 10) },
+    where: { id: mId },
     select: { id: true, parties_data: true, vehicles_data: true }
   });
 
@@ -121,14 +142,14 @@ async function calculateAutomatedTotals(matterId) {
 
 const getSettlement = async (matterId, user) => {
   await ensureTableExists();
-  const mId = parseInt(matterId, 10);
+  const mId = validateId(matterId, 'matter ID');
 
   const [historyRows, autoCalculated] = await Promise.all([
-    prisma.$queryRawUnsafe(`
+    prisma.$queryRaw`
       SELECT * FROM matter_settlements 
       WHERE matter_id = ${mId}
       ORDER BY created_at DESC
-    `),
+    `,
     calculateAutomatedTotals(mId)
   ]);
 
@@ -192,9 +213,20 @@ const getSettlement = async (matterId, user) => {
   };
 };
 
-const createSettlement = async (matterId, data, user) => {
+const createSettlement = async (matterId, data = {}, user) => {
   await ensureTableExists();
-  const mId = parseInt(matterId, 10);
+  const mId = validateId(matterId, 'matter ID');
+
+  const matter = await prisma.matter.findUnique({
+    where: { id: mId },
+    select: { id: true }
+  });
+  if (!matter) {
+    const err = new Error('Matter not found.');
+    err.statusCode = 404;
+    throw err;
+  }
+
   const {
     demand_amount = 0,
     initial_offer = 0,
@@ -221,11 +253,16 @@ const createSettlement = async (matterId, data, user) => {
   const pDmg = Math.max(0, Number(punitive_damages) || 0);
 
   const cleanStatus = (status || 'Open').trim();
-  const cleanNotes = notes ? notes.trim() : '';
-  const sDate = settlement_date ? `'${settlement_date}'` : 'NULL';
+  const cleanNotes = notes ? notes.trim() : null;
+
+  let validDate = null;
+  if (settlement_date) {
+    const d = new Date(settlement_date);
+    if (!isNaN(d.getTime())) validDate = d;
+  }
   const userId = user?.id ? parseInt(user.id, 10) : null;
 
-  await prisma.$executeRawUnsafe(`
+  await prisma.$executeRaw`
     INSERT INTO matter_settlements (
       matter_id, demand_amount, initial_offer, counter_offer, final_settlement_amount,
       future_medical_expenses, pain_and_suffering, out_of_pocket_expenses,
@@ -234,9 +271,9 @@ const createSettlement = async (matterId, data, user) => {
     VALUES (
       ${mId}, ${dAmt}, ${iOff}, ${cOff}, ${fAmt},
       ${fMed}, ${pSuf}, ${oPkt},
-      ${mDmg}, ${pDmg}, '${cleanStatus.replace(/'/g, "''")}', ${sDate}, ${cleanNotes ? `'${cleanNotes.replace(/'/g, "''")}'` : 'NULL'}, ${userId || 'NULL'}, NOW(), NOW()
+      ${mDmg}, ${pDmg}, ${cleanStatus}, ${validDate}, ${cleanNotes}, ${userId}, NOW(), NOW()
     )
-  `);
+  `;
 
   // Audit Log to Activity/Timeline
   await prisma.activity.create({
@@ -253,13 +290,13 @@ const createSettlement = async (matterId, data, user) => {
   return await getSettlement(mId, user);
 };
 
-const updateSettlement = async (id, data, user) => {
+const updateSettlement = async (id, data = {}, user) => {
   await ensureTableExists();
-  const sId = parseInt(id, 10);
+  const sId = validateId(id, 'settlement ID');
 
-  const existingRows = await prisma.$queryRawUnsafe(`
+  const existingRows = await prisma.$queryRaw`
     SELECT * FROM matter_settlements WHERE id = ${sId}
-  `);
+  `;
 
   if (!Array.isArray(existingRows) || existingRows.length === 0) {
     const err = new Error('Settlement record not found.');
@@ -294,10 +331,19 @@ const updateSettlement = async (id, data, user) => {
   const pDmg = Math.max(0, Number(punitive_damages !== undefined ? punitive_damages : existing.punitive_damages) || 0);
 
   const cleanStatus = (status !== undefined ? status : existing.status).trim();
-  const cleanNotes = notes !== undefined ? notes.trim() : (existing.notes || '');
-  const sDate = settlement_date !== undefined ? (settlement_date ? `'${settlement_date}'` : 'NULL') : (existing.settlement_date ? `'${existing.settlement_date.toISOString().split('T')[0]}'` : 'NULL');
+  const cleanNotes = notes !== undefined ? (notes ? notes.trim() : null) : existing.notes;
 
-  await prisma.$executeRawUnsafe(`
+  let validDate = null;
+  if (settlement_date !== undefined) {
+    if (settlement_date) {
+      const d = new Date(settlement_date);
+      if (!isNaN(d.getTime())) validDate = d;
+    }
+  } else if (existing.settlement_date) {
+    validDate = new Date(existing.settlement_date);
+  }
+
+  await prisma.$executeRaw`
     UPDATE matter_settlements
     SET demand_amount = ${dAmt},
         initial_offer = ${iOff},
@@ -308,12 +354,12 @@ const updateSettlement = async (id, data, user) => {
         out_of_pocket_expenses = ${oPkt},
         miscellaneous_damages = ${mDmg},
         punitive_damages = ${pDmg},
-        status = '${cleanStatus.replace(/'/g, "''")}',
-        settlement_date = ${sDate},
-        notes = ${cleanNotes ? `'${cleanNotes.replace(/'/g, "''")}'` : 'NULL'},
+        status = ${cleanStatus},
+        settlement_date = ${validDate},
+        notes = ${cleanNotes},
         updated_at = NOW()
     WHERE id = ${sId}
-  `);
+  `;
 
   const statusChanged = existing.status !== cleanStatus;
   const actionType = statusChanged ? 'settlement_status_changed' : 'settlement_updated';
@@ -335,11 +381,11 @@ const updateSettlement = async (id, data, user) => {
 
 const deleteSettlement = async (id, user) => {
   await ensureTableExists();
-  const sId = parseInt(id, 10);
+  const sId = validateId(id, 'settlement ID');
 
-  const existingRows = await prisma.$queryRawUnsafe(`
+  const existingRows = await prisma.$queryRaw`
     SELECT * FROM matter_settlements WHERE id = ${sId}
-  `);
+  `;
 
   if (!Array.isArray(existingRows) || existingRows.length === 0) {
     const err = new Error('Settlement record not found.');
@@ -349,9 +395,9 @@ const deleteSettlement = async (id, user) => {
 
   const existing = existingRows[0];
 
-  await prisma.$executeRawUnsafe(`
+  await prisma.$executeRaw`
     DELETE FROM matter_settlements WHERE id = ${sId}
-  `);
+  `;
 
   // Audit Log to Activity/Timeline
   await prisma.activity.create({

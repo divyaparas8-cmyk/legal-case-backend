@@ -17,7 +17,12 @@ router.post('/communications/matter/:matterId/read', controller.markMatterRead);
 router.patch('/matters/:matterId/communications/read', controller.markMatterRead);
 router.patch('/communications/:id/read', controller.markRead);
 
+// Routes for replies and threads
+router.post('/communications/reply', controller.reply);
+router.get('/communications/thread/:id', controller.getThread);
+
 // Routes for individual communication record actions
+router.get('/communications/:id', controller.getCommunicationById);
 router.put('/communications/:id', controller.updateCommunication);
 router.delete('/communications/:id', controller.deleteCommunication);
 

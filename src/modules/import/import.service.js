@@ -1,7 +1,6 @@
 const fs = require('fs');
 const Papa = require('papaparse');
-const { PrismaClient } = require('@prisma/client');
-const prisma = new PrismaClient();
+const prisma = require('../../config/db');
 
 exports.processClioMatterImport = async (filePath, dryRun, userId) => {
   return new Promise((resolve, reject) => {

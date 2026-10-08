@@ -17,7 +17,13 @@ router.get('/outlook/callback', calendarController.callbackOutlook);
 router.post('/outlook/disconnect', protect, calendarController.disconnectOutlook);
 router.get('/outlook/status', protect, calendarController.getStatusOutlook);
 
+router.get('/feed.ics', calendarController.getIcsFeed);
+router.get('/titan/status', protect, calendarController.getTitanCalendarStatus);
+router.get('/titan/verify', protect, calendarController.verifyTitanCalDav);
+router.post('/titan/sync', protect, calendarController.syncTitanCalendar);
+
 router.put('/:id', protect, calendarController.updateEvent);
 router.delete('/:id', protect, calendarController.deleteEvent);
+
 
 module.exports = router;

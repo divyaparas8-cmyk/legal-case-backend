@@ -50,15 +50,21 @@ app.use('/uploads', express.static('uploads'));
 
 // Health check
 app.get('/api/health', (req, res) => {
-  res.status(200).json({ status: 'OK', message: 'VkTori Legal Backend is running' });
+  res.status(200).json({
+    status: 'OK',
+    message: 'VkTori Legal Backend is running',
+    version: '1.2.0-timezone-fix',
+    timezone: 'America/Los_Angeles',
+    commit: process.env.RAILWAY_GIT_COMMIT_SHA || 'deployed'
+  });
 });
 
 // API Routes
+app.use('/api/calendar', calendarRoutes);
 app.use('/api', routes);
 app.use('/api/reports', reportRoutes);
-app.use('/api/calendar', calendarRoutes);
 app.use('/api/dashboards', dashboardRoutes);
-app.use('/api/tasks', require('./modules/tasks/tasks.routes'));
+
 app.use('/api/activities', require('./modules/activities/activities.routes'));
 app.use('/api/court-forms', require('./modules/court-forms/court-forms.routes'));
 app.use('/api/titan-email', require('./routes/titanEmail.routes'));

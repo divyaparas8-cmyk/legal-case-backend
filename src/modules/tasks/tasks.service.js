@@ -10,7 +10,7 @@ async function ensureTableExists() {
     await prisma.$executeRawUnsafe(`
       CREATE TABLE IF NOT EXISTS matter_tasks (
         id INT AUTO_INCREMENT PRIMARY KEY,
-        matter_id INT NOT NULL,
+        matter_id INT NULL,
         title VARCHAR(255) NOT NULL,
         description TEXT,
         assigned_user_id INT,
@@ -33,6 +33,12 @@ async function ensureTableExists() {
         INDEX idx_depends_on (depends_on_task_id)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
     `);
+
+    // Ensure matter_id is nullable if table already existed with NOT NULL
+    try {
+      await prisma.$executeRawUnsafe(`ALTER TABLE matter_tasks MODIFY matter_id INT NULL`);
+    } catch (_) {}
+
     dbInitialized = true;
   } catch (err) {
     console.error('Failed to initialize matter_tasks table:', err);
@@ -70,7 +76,12 @@ function getNextRecurringDueDate(currentDueDate, recurrence) {
 
 const getMatterTasks = async (matterId, query = {}, user) => {
   await ensureTableExists();
-  const mId = parseInt(matterId, 10);
+  const mId = Number(matterId);
+  if (!Number.isInteger(mId) || isNaN(mId) || mId <= 0) {
+    const err = new Error('Invalid matter ID.');
+    err.statusCode = 400;
+    throw err;
+  }
   const { q = '', status = 'All', priority = 'All', assigned_user_id = 'All', sort = 'Due Soon' } = query;
 
   const rows = await prisma.$queryRawUnsafe(`
@@ -185,9 +196,24 @@ const getMatterTasks = async (matterId, query = {}, user) => {
   };
 };
 
-const createTask = async (matterId, data, user) => {
+const createTask = async (matterId, data = {}, user) => {
   await ensureTableExists();
-  const mId = parseInt(matterId, 10);
+
+  let resolvedMatterId = null;
+  const rawMid = (matterId !== undefined && matterId !== null && matterId !== '')
+    ? matterId
+    : (data?.matter_id !== undefined ? data.matter_id : data?.matterId);
+
+  if (rawMid !== undefined && rawMid !== null && rawMid !== '') {
+    const parsed = Number(rawMid);
+    if (!Number.isInteger(parsed) || isNaN(parsed) || parsed <= 0) {
+      const err = new Error('Invalid matter ID.');
+      err.statusCode = 400;
+      throw err;
+    }
+    resolvedMatterId = parsed;
+  }
+
   const {
     title,
     description = '',
@@ -199,7 +225,7 @@ const createTask = async (matterId, data, user) => {
     depends_on_task_id = null,
     reminder_minutes_before = 60,
     reminder_type = 'System'
-  } = data;
+  } = data || {};
 
   if (!title || !title.trim()) {
     const err = new Error('Task Title is required.');
@@ -213,6 +239,7 @@ const createTask = async (matterId, data, user) => {
   const dDate = due_date ? `'${new Date(due_date).toISOString().slice(0, 19).replace('T', ' ')}'` : 'NULL';
   const depId = depends_on_task_id ? parseInt(depends_on_task_id, 10) : null;
   const userId = user?.id ? parseInt(user.id, 10) : null;
+  const mIdSql = resolvedMatterId !== null ? resolvedMatterId : 'NULL';
 
   await prisma.$executeRawUnsafe(`
     INSERT INTO matter_tasks (
@@ -220,7 +247,7 @@ const createTask = async (matterId, data, user) => {
       recurrence, depends_on_task_id, reminder_minutes_before, reminder_type, reminder_sent, created_by, created_at, updated_at
     )
     VALUES (
-      ${mId}, '${cleanTitle.replace(/'/g, "''")}', ${cleanDesc ? `'${cleanDesc.replace(/'/g, "''")}'` : 'NULL'},
+      ${mIdSql}, '${cleanTitle.replace(/'/g, "''")}', ${cleanDesc ? `'${cleanDesc.replace(/'/g, "''")}'` : 'NULL'},
       ${assignUid || 'NULL'}, ${dDate}, '${priority}', '${status}',
       '${recurrence}', ${depId || 'NULL'}, ${parseInt(reminder_minutes_before, 10) || 60}, '${reminder_type}', 0,
       ${userId || 'NULL'}, NOW(), NOW()
@@ -230,18 +257,66 @@ const createTask = async (matterId, data, user) => {
   const assignedUser = assignUid ? await getUserInfo(assignUid) : null;
 
   // Log Activity to Timeline
-  await prisma.activity.create({
-    data: {
-      matter_id: mId,
-      entity_type: 'matter',
-      entity_id: mId,
-      action: 'task_created',
-      description: `Task "${cleanTitle}" created (Priority: ${priority}, Assigned: ${assignedUser?.full_name || 'Unassigned'})`,
-      actor_user_id: user?.id || null
-    }
-  });
+  if (resolvedMatterId !== null) {
+    try {
+      await prisma.activity.create({
+        data: {
+          matter_id: resolvedMatterId,
+          entity_type: 'matter',
+          entity_id: resolvedMatterId,
+          action: 'task_created',
+          description: `Task "${cleanTitle}" created (Priority: ${priority}, Assigned: ${assignedUser?.full_name || 'Unassigned'})`,
+          actor_user_id: user?.id || null
+        }
+      });
+    } catch (_) {}
+  } else {
+    try {
+      await prisma.activity.create({
+        data: {
+          matter_id: null,
+          entity_type: 'task',
+          entity_id: 0,
+          action: 'task_created',
+          description: `Global Task "${cleanTitle}" created (Priority: ${priority}, Assigned: ${assignedUser?.full_name || 'Unassigned'})`,
+          actor_user_id: user?.id || null
+        }
+      });
+    } catch (_) {}
+  }
 
-  return await getMatterTasks(mId, {}, user);
+  if (resolvedMatterId !== null) {
+    return await getMatterTasks(resolvedMatterId, {}, user);
+  }
+
+  // For global tasks, return the newly created task record
+  const lastRows = await prisma.$queryRawUnsafe(`
+    SELECT * FROM matter_tasks WHERE id = LAST_INSERT_ID()
+  `);
+  if (Array.isArray(lastRows) && lastRows.length > 0) {
+    const t = lastRows[0];
+    return {
+      id: t.id,
+      matter_id: t.matter_id,
+      title: t.title,
+      description: t.description || '',
+      assigned_user_id: t.assigned_user_id,
+      assigned_user: assignedUser || (t.assigned_user_id ? { id: t.assigned_user_id, full_name: `User #${t.assigned_user_id}` } : null),
+      due_date: t.due_date,
+      priority: t.priority || 'Medium',
+      status: t.status || 'Pending',
+      recurrence: t.recurrence || 'One Time',
+      reminder_minutes_before: t.reminder_minutes_before || 60,
+      reminder_type: t.reminder_type || 'System',
+      reminder_sent: Boolean(t.reminder_sent),
+      completed_at: t.completed_at,
+      created_by: t.created_by,
+      created_at: t.created_at,
+      updated_at: t.updated_at
+    };
+  }
+
+  return { success: true, title: cleanTitle };
 };
 
 const updateTask = async (id, data, user) => {

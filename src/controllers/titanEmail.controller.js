@@ -154,6 +154,17 @@ const deleteEmailAccount = async (req, res) => {
   }
 };
 
+const verifyConnection = async (req, res) => {
+  try {
+    const { accountId } = req.query;
+    const result = await titanEmailService.verifyConnection(accountId, req.user.id);
+    res.json(result);
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+
 module.exports = {
   syncAccount,
   getMessages,
@@ -170,5 +181,6 @@ module.exports = {
   getEmailAccounts,
   addEmailAccount,
   deleteEmailAccount,
+  verifyConnection,
 };
 

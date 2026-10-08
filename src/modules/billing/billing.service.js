@@ -933,9 +933,30 @@ const sendInvoice = async (id, user) => {
       documentId = doc.id;
     }
 
-    // Simulate sending email (No email provider configured)
-    const emailStatus = 'sent';
-    const emailError = null;
+    // Dispatch email via Titan Email if configured, else preserve graceful record
+    let emailStatus = 'sent';
+    let emailError = null;
+    let messageText = 'Invoice emailed successfully';
+
+    const clientEmail = invoice.matter?.client?.email;
+    const titanEmailService = require('../../services/email/titanEmail.service');
+
+    if (titanEmailService.isConfigured() && clientEmail) {
+      try {
+        await titanEmailService.sendSystemEmail({
+          to: clientEmail,
+          subject: `Invoice ${invoice.invoice_number} from Legal Case Management`,
+          html: `<p>Dear ${invoice.matter?.client?.full_name || 'Client'},</p><p>Please find attached your invoice <strong>${invoice.invoice_number}</strong> for amount <strong>$${invoice.amount}</strong>.</p><p>Due Date: ${invoice.due_date ? new Date(invoice.due_date).toLocaleDateString() : 'Upon receipt'}</p><p>Thank you for your business.</p>`,
+        });
+        messageText = `Invoice emailed successfully to ${clientEmail} via Titan Mail`;
+      } catch (mailErr) {
+        emailStatus = 'failed';
+        emailError = mailErr.message;
+        messageText = `Failed to transmit invoice via Titan Mail: ${mailErr.message}`;
+      }
+    } else if (!titanEmailService.isConfigured()) {
+      messageText = 'Invoice processed (Titan credentials not configured in environment)';
+    }
 
     // Update invoice
     const updatedInvoice = await prisma.invoice.update({
@@ -955,16 +976,17 @@ const sendInvoice = async (id, user) => {
         entity_type: 'invoice',
         entity_id: invoice.id,
         action: 'emailed',
-        description: `Invoice ${invoice.invoice_number} emailed to ${invoice.matter?.client?.email || 'Client'}`,
+        description: `Invoice ${invoice.invoice_number} emailed to ${clientEmail || 'Client'}`,
         actor_user_id: user.id || invoice.created_by_user_id
       }
     });
 
     return {
-      success: true,
-      message: 'Invoice emailed successfully (Simulated - no email provider configured)',
+      success: emailStatus !== 'failed',
+      message: messageText,
       invoice: updatedInvoice
     };
+
   } catch (error) {
     await prisma.invoice.update({
       where: { id: invoiceId },

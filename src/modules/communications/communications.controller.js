@@ -58,6 +58,35 @@ const markRead = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
+const reply = async (req, res, next) => {
+  try {
+    const data = await service.reply(req.body, req.user);
+    res.status(201).json(sendResponse(true, 'Reply sent successfully', data));
+  } catch (err) { next(err); }
+};
+
+const getThread = async (req, res, next) => {
+  try {
+    const threadId = parseInt(req.params.id, 10);
+    if (isNaN(threadId) || threadId <= 0) {
+      return res.status(400).json(sendResponse(false, 'Invalid thread ID'));
+    }
+    const data = await service.getThread(threadId, req.user);
+    res.status(200).json(sendResponse(true, 'Thread fetched successfully', data));
+  } catch (err) { next(err); }
+};
+
+const getCommunicationById = async (req, res, next) => {
+  try {
+    const commId = parseInt(req.params.id, 10);
+    if (isNaN(commId) || commId <= 0) {
+      return res.status(400).json(sendResponse(false, 'Invalid communication ID'));
+    }
+    const data = await service.getCommunicationById(commId, req.user);
+    res.status(200).json(sendResponse(true, 'Communication fetched successfully', data));
+  } catch (err) { next(err); }
+};
+
 module.exports = {
   getMatterCommunications,
   getAllCommunications,
@@ -65,5 +94,8 @@ module.exports = {
   updateCommunication,
   deleteCommunication,
   markMatterRead,
-  markRead
+  markRead,
+  reply,
+  getThread,
+  getCommunicationById
 };

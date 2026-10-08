@@ -133,3 +133,56 @@ exports.deleteCategory = async (req, res, next) => {
     next(error);
   }
 };
+
+const titanCalendarService = require('../settings/titan-calendar.service');
+
+exports.getIcsFeed = async (req, res, next) => {
+  try {
+    const rawEvents = await prisma.calendarEvent.findMany({
+      include: { matter: { select: { matter_number: true, title: true } } },
+      orderBy: { event_date: 'asc' }
+    });
+    const icsContent = titanCalendarService.generateIcsFeed(rawEvents);
+    res.setHeader('Content-Type', 'text/calendar; charset=utf-8');
+    res.setHeader('Content-Disposition', 'attachment; filename="legal-case-calendar.ics"');
+    res.status(200).send(icsContent);
+  } catch (error) {
+    next(error);
+  }
+};
+
+exports.getTitanCalendarStatus = async (req, res, next) => {
+  try {
+    const settings = await titanCalendarService.getSettings();
+    res.status(200).json({
+      success: true,
+      configured: Boolean(settings.email && settings.password),
+      caldav_host: settings.host,
+      caldav_port: settings.port,
+      email: settings.email || null,
+      supported_methods: ['CalDAV (RFC 4791)', 'iCalendar Subscription (RFC 5545)'],
+      feed_url: `${req.protocol}://${req.get('host')}/api/calendar/feed.ics`
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+exports.verifyTitanCalDav = async (req, res, next) => {
+  try {
+    const result = await titanCalendarService.verifyCalDavConnection();
+    res.status(200).json(result);
+  } catch (error) {
+    next(error);
+  }
+};
+
+exports.syncTitanCalendar = async (req, res, next) => {
+  try {
+    const result = await titanCalendarService.syncFromTitan(req.user?.id);
+    res.status(200).json(result);
+  } catch (error) {
+    next(error);
+  }
+};
+

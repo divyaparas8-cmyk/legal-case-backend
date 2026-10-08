@@ -6,6 +6,7 @@ const { protect } = require('../middlewares/auth.middleware');
 router.use(protect);
 
 router.post('/sync', titanEmailController.syncAccount);
+router.get('/verify', titanEmailController.verifyConnection);
 router.get('/accounts', titanEmailController.getEmailAccounts);
 router.post('/accounts', titanEmailController.addEmailAccount);
 router.delete('/accounts/:id', titanEmailController.deleteEmailAccount);

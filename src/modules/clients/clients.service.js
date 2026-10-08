@@ -77,9 +77,11 @@ const create = async (data, user) => {
   let targetUser = await prisma.user.findUnique({ where: { email } });
 
   if (!targetUser) {
-    // 2. Create new user with provided password or default '1234'
+    // 2. Create new user with provided password or secure random temporary password
+    const crypto = require('crypto');
+    const tempPass = password || crypto.randomBytes(16).toString('hex');
     const salt = await bcrypt.genSalt(10);
-    const password_hash = await bcrypt.hash(password || '1234', salt);
+    const password_hash = await bcrypt.hash(tempPass, salt);
 
     targetUser = await prisma.user.create({
       data: {
@@ -416,7 +418,21 @@ const sendPortalInvite = async (clientId, user) => {
     });
 
     // Triggers email dispatch
-    console.log(`[Email Dispatch] Transactional Portal Invitation Link: http://localhost:5173/portal-invite?token=${inviteToken}`);
+    const portalUrl = `${process.env.CLIENT_URL || 'http://localhost:5173'}/portal-invite?token=${inviteToken}`;
+    console.log(`[Email Dispatch] Transactional Portal Invitation Link: ${portalUrl}`);
+
+    const titanEmailService = require('../../services/email/titanEmail.service');
+    if (titanEmailService.isConfigured() && client.email) {
+      try {
+        await titanEmailService.sendSystemEmail({
+          to: client.email,
+          subject: 'Your Client Portal Access Invitation',
+          html: `<p>Dear ${client.full_name},</p><p>You have been invited to securely access your legal case management portal.</p><p><a href="${portalUrl}" style="background-color: #2563eb; color: #ffffff; padding: 10px 20px; text-decoration: none; border-radius: 6px; display: inline-block;">Access Client Portal</a></p><p>Or copy this link into your browser:<br/>${portalUrl}</p><p>This link expires in 7 days.</p>`,
+        });
+      } catch (mailErr) {
+        console.error('[Portal Invite Email Warning]:', mailErr.message);
+      }
+    }
 
     // Create Audit Activity Timeline record
     await prisma.activity.create({

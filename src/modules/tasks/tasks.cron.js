@@ -3,21 +3,27 @@ const prisma = require('../../config/db');
 
 // Run every hour
 cron.schedule('0 * * * *', async () => {
-//   console.log('[Cron] Running scheduled task check...');
+  await runTaskCronCheck();
+});
+
+async function runTaskCronCheck() {
   try {
     const now = new Date();
-    
-    // Check Reminders (due_date minus reminder_minutes_before <= now) and not reminder_sent and not completed
-    const pendingReminders = await prisma.$queryRawUnsafe(`
-      SELECT * FROM matter_tasks 
-      WHERE status NOT IN ('Completed', 'Cancelled')
-        AND reminder_sent = 0 
-        AND due_date IS NOT NULL
-        AND DATE_SUB(due_date, INTERVAL reminder_minutes_before MINUTE) <= NOW()
-    `);
 
-    if (Array.isArray(pendingReminders)) {
-      for (const task of pendingReminders) {
+    // 1. Check official Prisma `Task` model (official schema)
+    try {
+      const pendingOfficialTasks = await prisma.task.findMany({
+        where: {
+          status: { notIn: ['completed', 'cancelled', 'Completed', 'Cancelled'] },
+          reminder_sent: false,
+          OR: [
+            { reminder_date: { lte: now } },
+            { due_date: { lte: now } }
+          ]
+        }
+      });
+
+      for (const task of pendingOfficialTasks) {
         if (task.assigned_user_id) {
           await prisma.notification.create({
             data: {
@@ -25,36 +31,61 @@ cron.schedule('0 * * * *', async () => {
               title: `Reminder: ${task.title}`,
               message: `Task reminder for: ${task.title}`,
               type: 'task_reminder',
-              reference_id: task.id,
-              reference_type: 'task'
+              reference_id: task.id
             }
           });
         }
-        
-        // Update as sent
-        await prisma.$executeRawUnsafe(`
-          UPDATE matter_tasks 
-          SET reminder_sent = 1 
-          WHERE id = ${task.id}
-        `);
+
+        await prisma.task.update({
+          where: { id: task.id },
+          data: { reminder_sent: true }
+        });
       }
+    } catch (prismaErr) {
+      console.error('[Task Cron Official Model Error]', prismaErr.message);
     }
 
-    // Determine boundaries for "due today" and "overdue"
-    // For simplicity, we can rely on pure dates without complex timezone math,
-    // or just assume due_date represents the day deadline.
-    const startOfDay = new Date(now.setHours(0,0,0,0));
-    const endOfDay = new Date(now.setHours(23,59,59,999));
+    // 2. Check matter_tasks table safely (if present)
+    try {
+      const pendingReminders = await prisma.$queryRaw`
+        SELECT id, title, assigned_user_id 
+        FROM matter_tasks 
+        WHERE status NOT IN ('Completed', 'Cancelled')
+          AND reminder_sent = 0 
+          AND due_date IS NOT NULL
+          AND DATE_SUB(due_date, INTERVAL reminder_minutes_before MINUTE) <= NOW()
+      `;
 
-    // For demonstration of due_today/overdue, we'll leave it simple.
-    // Overdue is where due_date < startOfDay. We won't re-notify every hour,
-    // so we'd need tracking fields like 'overdue_notified'. 
-    // Given the prompt "Prevent duplicate notifications", we can use a similar approach
-    // or log to a secondary table. Since the schema only has reminder_sent, 
-    // we'll rely on the existing reminder infrastructure to handle the explicit reminder.
-    
-//     console.log(`[Cron] Processed ${pendingReminders.length} task reminders.`);
+      if (Array.isArray(pendingReminders)) {
+        for (const task of pendingReminders) {
+          if (task.assigned_user_id) {
+            await prisma.notification.create({
+              data: {
+                user_id: task.assigned_user_id,
+                title: `Reminder: ${task.title}`,
+                message: `Task reminder for: ${task.title}`,
+                type: 'task_reminder',
+                reference_id: task.id
+              }
+            });
+          }
+
+          await prisma.$executeRaw`
+            UPDATE matter_tasks 
+            SET reminder_sent = 1 
+            WHERE id = ${task.id}
+          `;
+        }
+      }
+    } catch (rawErr) {
+      // Safely ignore if matter_tasks doesn't exist (P2010 / 1146)
+      if (rawErr.code !== 'P2010' && !rawErr.message?.includes('matter_tasks')) {
+        console.error('[Task Cron matter_tasks Check Error]', rawErr.message);
+      }
+    }
   } catch (err) {
-    console.error('[Cron Error]', err);
+    console.error('[Task Cron Error]', err);
   }
-});
+}
+
+module.exports = { runTaskCronCheck };

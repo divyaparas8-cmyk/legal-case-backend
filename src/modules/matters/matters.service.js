@@ -506,8 +506,9 @@ const create = async (data, user) => {
       let targetUser = rEmail ? await prisma.user.findUnique({ where: { email: rEmail } }) : null;
       if (!targetUser) {
         const bcrypt = require('bcryptjs');
+        const crypto = require('crypto');
         const salt = await bcrypt.genSalt(10);
-        const password_hash = await bcrypt.hash('1234', salt);
+        const password_hash = await bcrypt.hash(crypto.randomBytes(16).toString('hex'), salt);
         targetUser = await prisma.user.create({
           data: {
             email: rEmail,
@@ -576,8 +577,9 @@ const create = async (data, user) => {
       let targetUser = await prisma.user.findUnique({ where: { email: party.email } });
       if (!targetUser) {
         const bcrypt = require('bcryptjs');
+        const crypto = require('crypto');
         const salt = await bcrypt.genSalt(10);
-        const password_hash = await bcrypt.hash('1234', salt);
+        const password_hash = await bcrypt.hash(crypto.randomBytes(16).toString('hex'), salt);
         targetUser = await prisma.user.create({
           data: {
             email: party.email,

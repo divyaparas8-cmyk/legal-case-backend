@@ -77,16 +77,26 @@ async function getContactInfo(contactId) {
   return client;
 }
 
+function validateId(val, fieldName = 'ID') {
+  const num = Number(val);
+  if (!Number.isInteger(num) || isNaN(num) || num <= 0) {
+    const err = new Error(`Invalid ${fieldName}.`);
+    err.statusCode = 400;
+    throw err;
+  }
+  return num;
+}
+
 const getMatterRelationships = async (matterId, query = {}, user) => {
   await ensureTableExists();
-  const mId = parseInt(matterId, 10);
+  const mId = validateId(matterId, 'matter ID');
   const { q = '', category = 'All', sort = 'Newest' } = query;
 
-  const rows = await prisma.$queryRawUnsafe(`
+  const rows = await prisma.$queryRaw`
     SELECT * FROM matter_relationships 
     WHERE matter_id = ${mId}
     ORDER BY created_at DESC
-  `);
+  `;
 
   if (!Array.isArray(rows)) return [];
 
@@ -152,9 +162,20 @@ const getMatterRelationships = async (matterId, query = {}, user) => {
   return filtered;
 };
 
-const createRelationship = async (matterId, data, user) => {
+const createRelationship = async (matterId, data = {}, user) => {
   await ensureTableExists();
-  const mId = parseInt(matterId, 10);
+  const mId = validateId(matterId, 'matter ID');
+
+  const matter = await prisma.matter.findUnique({
+    where: { id: mId },
+    select: { id: true }
+  });
+  if (!matter) {
+    const err = new Error('Matter not found.');
+    err.statusCode = 404;
+    throw err;
+  }
+
   const { from_contact_id, from_contact_name, to_contact_id, to_contact_name, relationship_type, notes } = data;
 
   // Resolve from / to — either a numeric ID or a plain-text name
@@ -188,25 +209,20 @@ const createRelationship = async (matterId, data, user) => {
   const resolvedToName = toContact?.full_name || toName;
 
   const cleanType = relationship_type.trim();
-  const cleanNotes = notes ? notes.trim() : '';
+  const cleanNotes = notes ? notes.trim() : null;
   const userId = user?.id ? parseInt(user.id, 10) : null;
 
-  const fromIdSQL = fromId ? fromId : 'NULL';
-  const toIdSQL = toId ? toId : 'NULL';
-  const fromNameSQL = resolvedFromName ? `'${resolvedFromName.replace(/'/g, "''")}'` : 'NULL';
-  const toNameSQL = resolvedToName ? `'${resolvedToName.replace(/'/g, "''")}'` : 'NULL';
-
-  await prisma.$executeRawUnsafe(`
+  await prisma.$executeRaw`
     INSERT INTO matter_relationships (matter_id, from_contact_id, from_contact_name, to_contact_id, to_contact_name, relationship_type, notes, created_by, created_at, updated_at)
-    VALUES (${mId}, ${fromIdSQL}, ${fromNameSQL}, ${toIdSQL}, ${toNameSQL}, '${cleanType.replace(/'/g, "''")}', ${cleanNotes ? `'${cleanNotes.replace(/'/g, "''")}'` : 'NULL'}, ${userId || 'NULL'}, NOW(), NOW())
-  `);
+    VALUES (${mId}, ${fromId}, ${resolvedFromName}, ${toId}, ${resolvedToName}, ${cleanType}, ${cleanNotes}, ${userId}, NOW(), NOW())
+  `;
 
   // Fetch created row
-  const createdRows = await prisma.$queryRawUnsafe(`
+  const createdRows = await prisma.$queryRaw`
     SELECT * FROM matter_relationships
     WHERE matter_id = ${mId}
     ORDER BY id DESC LIMIT 1
-  `);
+  `;
 
   const createdRel = createdRows[0];
 
@@ -229,13 +245,13 @@ const createRelationship = async (matterId, data, user) => {
   };
 };
 
-const updateRelationship = async (id, data, user) => {
+const updateRelationship = async (id, data = {}, user) => {
   await ensureTableExists();
-  const relId = parseInt(id, 10);
+  const relId = validateId(id, 'relationship ID');
 
-  const existingRows = await prisma.$queryRawUnsafe(`
+  const existingRows = await prisma.$queryRaw`
     SELECT * FROM matter_relationships WHERE id = ${relId}
-  `);
+  `;
 
   if (!Array.isArray(existingRows) || existingRows.length === 0) {
     const err = new Error('Relationship not found.');
@@ -246,15 +262,15 @@ const updateRelationship = async (id, data, user) => {
   const existing = existingRows[0];
   const { relationship_type, notes } = data;
   const cleanType = (relationship_type !== undefined ? relationship_type : existing.relationship_type).trim();
-  const cleanNotes = notes !== undefined ? notes.trim() : (existing.notes || '');
+  const cleanNotes = notes !== undefined ? (notes ? notes.trim() : null) : existing.notes;
 
-  await prisma.$executeRawUnsafe(`
+  await prisma.$executeRaw`
     UPDATE matter_relationships
-    SET relationship_type = '${cleanType.replace(/'/g, "''")}',
-        notes = ${cleanNotes ? `'${cleanNotes.replace(/'/g, "''")}'` : 'NULL'},
+    SET relationship_type = ${cleanType},
+        notes = ${cleanNotes},
         updated_at = NOW()
     WHERE id = ${relId}
-  `);
+  `;
 
   const fromContact = existing.from_contact_id ? await getContactInfo(existing.from_contact_id) : null;
   const toContact = existing.to_contact_id ? await getContactInfo(existing.to_contact_id) : null;
@@ -282,11 +298,11 @@ const updateRelationship = async (id, data, user) => {
 
 const deleteRelationship = async (id, user) => {
   await ensureTableExists();
-  const relId = parseInt(id, 10);
+  const relId = validateId(id, 'relationship ID');
 
-  const existingRows = await prisma.$queryRawUnsafe(`
+  const existingRows = await prisma.$queryRaw`
     SELECT * FROM matter_relationships WHERE id = ${relId}
-  `);
+  `;
 
   if (!Array.isArray(existingRows) || existingRows.length === 0) {
     const err = new Error('Relationship not found.');
@@ -298,9 +314,9 @@ const deleteRelationship = async (id, user) => {
   const fromContact = existing.from_contact_id ? await getContactInfo(existing.from_contact_id) : null;
   const toContact = existing.to_contact_id ? await getContactInfo(existing.to_contact_id) : null;
 
-  await prisma.$executeRawUnsafe(`
+  await prisma.$executeRaw`
     DELETE FROM matter_relationships WHERE id = ${relId}
-  `);
+  `;
 
   // Audit Log to Activity/Timeline
   await prisma.activity.create({

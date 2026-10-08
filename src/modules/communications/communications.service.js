@@ -11,6 +11,7 @@ async function ensureTableExists() {
       CREATE TABLE IF NOT EXISTS matter_communications (
         id INT AUTO_INCREMENT PRIMARY KEY,
         matter_id INT NOT NULL,
+        parent_id INT NULL,
         type VARCHAR(50) DEFAULT 'Note',
         subject VARCHAR(255) NOT NULL,
         description LONGTEXT,
@@ -21,11 +22,17 @@ async function ensureTableExists() {
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
         INDEX idx_matter (matter_id),
+        INDEX idx_parent (parent_id),
         INDEX idx_type (type),
         INDEX idx_contact (contact_id),
         INDEX idx_comm_date (communication_date)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
     `);
+
+    // Ensure parent_id exists if table was created previously without it
+    try {
+      await prisma.$executeRawUnsafe(`ALTER TABLE matter_communications ADD COLUMN parent_id INT NULL`);
+    } catch (_) {}
 
     // Recover/Sync legacy communication records into matter_communications
     try {
@@ -96,9 +103,23 @@ async function getContactInfo(contactId) {
   try {
     const contact = await prisma.client.findUnique({
       where: { id: parseInt(contactId, 10) },
-      select: { id: true, first_name: true, last_name: true, email: true, phone: true, company: true }
+      select: {
+        id: true,
+        full_name: true,
+        contact_first_name: true,
+        contact_last_name: true,
+        organization_name: true,
+        email: true,
+        phone: true
+      }
     });
-    return contact;
+    if (!contact) return null;
+    return {
+      ...contact,
+      first_name: contact.contact_first_name || contact.full_name?.split(' ')[0] || '',
+      last_name: contact.contact_last_name || contact.full_name?.split(' ').slice(1).join(' ') || '',
+      company: contact.organization_name || ''
+    };
   } catch (e) {
     return null;
   }
@@ -646,6 +667,188 @@ const fileEmailToMatter = async (emailData, matterId, user) => {
   return { success: true, communication: createdComm };
 };
 
+const getCommunicationById = async (id, user) => {
+  await ensureTableExists();
+  const commId = parseInt(id, 10);
+  if (isNaN(commId) || commId <= 0) {
+    const err = new Error('Invalid communication ID.');
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const rows = await prisma.$queryRawUnsafe(`SELECT * FROM matter_communications WHERE id = ${commId}`);
+  if (!Array.isArray(rows) || rows.length === 0) {
+    const legacy = await prisma.communication.findUnique({ where: { id: commId } });
+    if (!legacy) {
+      const err = new Error('Communication record not found.');
+      err.statusCode = 404;
+      throw err;
+    }
+    const creator = await getUserInfo(legacy.sender_user_id);
+    return {
+      id: legacy.id,
+      matter_id: legacy.matter_id,
+      type: legacy.communication_type || 'Note',
+      subject: legacy.subject || 'Untitled Communication',
+      description: legacy.message_body || '',
+      message_body: legacy.message_body || '',
+      communication_date: legacy.created_at,
+      created_at: legacy.created_at,
+      sender: creator,
+      creator
+    };
+  }
+
+  const c = rows[0];
+  const contact = await getContactInfo(c.contact_id);
+  const creator = await getUserInfo(c.created_by);
+  const documents = await getAttachedDocuments(c.document_ids);
+
+  return {
+    id: c.id,
+    matter_id: c.matter_id,
+    parent_id: c.parent_id || null,
+    type: c.type || 'Note',
+    communication_type: (c.type || 'note').toLowerCase().includes('email') ? 'email_log' : (c.type || '').toLowerCase().includes('call') ? 'call_log' : (c.type || '').toLowerCase(),
+    subject: c.subject || 'Untitled Communication',
+    description: c.description || '',
+    message_body: c.description || '',
+    communication_date: c.communication_date || c.created_at,
+    created_at: c.communication_date || c.created_at,
+    updated_at: c.updated_at || c.created_at,
+    contact_id: c.contact_id,
+    contact: contact || (c.contact_id ? { id: c.contact_id, first_name: `Contact #${c.contact_id}`, last_name: '' } : null),
+    document_ids: c.document_ids,
+    documents,
+    created_by: c.created_by,
+    sender_user_id: c.created_by,
+    creator,
+    sender: creator || (contact ? { id: contact.id, full_name: `${contact.first_name} ${contact.last_name}`, email: contact.email } : null)
+  };
+};
+
+const reply = async (data = {}, user) => {
+  await ensureTableExists();
+  const parentId = parseInt(data.parent_id || data.parentId, 10);
+  if (isNaN(parentId) || parentId <= 0) {
+    const err = new Error('parent_id is required for a reply.');
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const messageBody = (data.message_body || data.body || data.message || '').trim();
+  if (!messageBody) {
+    const err = new Error('Reply message body cannot be empty.');
+    err.statusCode = 400;
+    throw err;
+  }
+
+  let parent = null;
+  const pRows = await prisma.$queryRawUnsafe(`SELECT * FROM matter_communications WHERE id = ${parentId}`);
+  if (Array.isArray(pRows) && pRows.length > 0) {
+    parent = pRows[0];
+  } else {
+    parent = await prisma.communication.findUnique({ where: { id: parentId } });
+  }
+
+  const mId = parent?.matter_id ? parseInt(parent.matter_id, 10) : 0;
+  const parentSubject = parent?.subject || 'Communication';
+  const replySubject = parentSubject.startsWith('Re: ') ? parentSubject : `Re: ${parentSubject}`;
+  const cleanSubject = replySubject.replace(/'/g, "''");
+  const cleanBody = messageBody.replace(/'/g, "''");
+  const cid = parent?.contact_id ? parseInt(parent.contact_id, 10) : null;
+  const userId = user?.id ? parseInt(user.id, 10) : null;
+
+  await prisma.$executeRawUnsafe(`
+    INSERT INTO matter_communications (
+      matter_id, parent_id, type, subject, description, communication_date, contact_id, created_by, created_at, updated_at
+    )
+    VALUES (
+      ${mId}, ${parentId}, 'Note', '${cleanSubject}', '${cleanBody}', NOW(), ${cid || 'NULL'}, ${userId || 'NULL'}, NOW(), NOW()
+    )
+  `);
+
+  if (mId > 0) {
+    try {
+      await prisma.communication.create({
+        data: {
+          matter_id: mId,
+          parent_id: parentId,
+          sender_user_id: user?.id || 1,
+          sender_role: user?.role || 'admin',
+          subject: replySubject,
+          message_body: messageBody,
+          communication_type: 'note'
+        }
+      });
+    } catch (_) {}
+  }
+
+  const lastRows = await prisma.$queryRawUnsafe(`
+    SELECT * FROM matter_communications WHERE id = LAST_INSERT_ID()
+  `);
+  const createdReply = Array.isArray(lastRows) && lastRows.length > 0 ? lastRows[0] : null;
+  const creator = await getUserInfo(userId);
+
+  return {
+    id: createdReply ? createdReply.id : Date.now(),
+    matter_id: mId,
+    parent_id: parentId,
+    type: 'Note',
+    subject: replySubject,
+    description: messageBody,
+    message_body: messageBody,
+    communication_date: createdReply?.created_at || new Date().toISOString(),
+    created_at: createdReply?.created_at || new Date().toISOString(),
+    created_by: userId,
+    sender: creator,
+    creator
+  };
+};
+
+const getThread = async (id, user) => {
+  await ensureTableExists();
+  const threadId = parseInt(id, 10);
+  if (isNaN(threadId) || threadId <= 0) {
+    const err = new Error('Invalid thread ID.');
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const parent = await getCommunicationById(threadId, user);
+
+  const replyRows = await prisma.$queryRawUnsafe(`
+    SELECT * FROM matter_communications 
+    WHERE parent_id = ${threadId}
+    ORDER BY communication_date ASC
+  `);
+
+  const replies = await Promise.all(
+    (Array.isArray(replyRows) ? replyRows : []).map(async r => {
+      const creator = await getUserInfo(r.created_by);
+      return {
+        id: r.id,
+        matter_id: r.matter_id,
+        parent_id: r.parent_id,
+        type: r.type || 'Note',
+        subject: r.subject,
+        description: r.description,
+        message_body: r.description || '',
+        communication_date: r.communication_date || r.created_at,
+        created_at: r.communication_date || r.created_at,
+        created_by: r.created_by,
+        sender: creator,
+        creator
+      };
+    })
+  );
+
+  return {
+    parent,
+    replies
+  };
+};
+
 module.exports = {
   getMatterCommunications,
   getAllCommunications,
@@ -655,5 +858,8 @@ module.exports = {
   markMatterRead,
   markRead,
   autoSuggestMatterForEmail,
-  fileEmailToMatter
+  fileEmailToMatter,
+  getCommunicationById,
+  reply,
+  getThread
 };
