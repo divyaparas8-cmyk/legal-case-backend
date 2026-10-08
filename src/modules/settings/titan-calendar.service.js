@@ -530,7 +530,51 @@ class TitanCalendarService {
     const rrule = getProp('RRULE');
     const lastModified = parseCalDavDate(getPropLine('LAST-MODIFIED') || getProp('LAST-MODIFIED'));
 
-    return { uid, summary, description, location, dtstart, dtend, status, rrule, lastModified };
+    // Extract ORGANIZER
+    let organizer = null;
+    const orgMatch = unfolded.match(/(?:^|\r?\n)(ORGANIZER[^:\r\n]*:[^\r\n]*)/i);
+    if (orgMatch) {
+      const line = orgMatch[1];
+      const mailtoM = line.match(/:mailto:([^\r\n]+)/i) || line.match(/:([^\r\n]+)/i);
+      const email = mailtoM ? mailtoM[1].trim() : '';
+      const cnM = line.match(/CN=([^;:\"\r\n]+|\"[^\"]+\")/i);
+      const name = cnM ? cnM[1].replace(/^\"|\"$/g, '').trim() : email;
+      organizer = { email, name };
+    }
+
+    // Extract ATTENDEEs
+    const attendees = [];
+    const attRegex = /(?:^|\r?\n)(ATTENDEE[^:\r\n]*:[^\r\n]*)/gi;
+    let attMatch;
+    while ((attMatch = attRegex.exec(unfolded)) !== null) {
+      const line = attMatch[1];
+      const mailtoM = line.match(/:mailto:([^\r\n]+)/i) || line.match(/:([^\r\n]+)/i);
+      if (!mailtoM) continue;
+      const email = mailtoM[1].trim();
+      const cnM = line.match(/CN=([^;:\"\r\n]+|\"[^\"]+\")/i);
+      const name = cnM ? cnM[1].replace(/^\"|\"$/g, '').trim() : email;
+      const partstatM = line.match(/PARTSTAT=([A-Z\-]+)/i);
+      const statusVal = partstatM ? partstatM[1].toLowerCase() : 'needs-action';
+      const isOrg = organizer && organizer.email.toLowerCase() === email.toLowerCase();
+      attendees.push({
+        email,
+        name,
+        status: statusVal,
+        isOrganizer: isOrg
+      });
+    }
+
+    // If organizer is present but not in attendees, prepend organizer
+    if (organizer && !attendees.some(a => a.email.toLowerCase() === organizer.email.toLowerCase())) {
+      attendees.unshift({
+        email: organizer.email,
+        name: organizer.name,
+        status: 'accepted',
+        isOrganizer: true
+      });
+    }
+
+    return { uid, summary, description, location, dtstart, dtend, status, rrule, lastModified, organizer, attendees };
   }
 
   /**
@@ -726,9 +770,26 @@ class TitanCalendarService {
                   });
                   updatedCount++;
                 }
+
+                // Sync attendees for existing event
+                if (parsed.attendees && parsed.attendees.length > 0) {
+                  try {
+                    await prisma.eventAttendee.deleteMany({ where: { event_id: existing.id } });
+                    await prisma.eventAttendee.createMany({
+                      data: parsed.attendees.map(a => ({
+                        event_id: existing.id,
+                        email: a.email,
+                        status: a.status === 'accepted' ? 'accepted' : 'pending',
+                        is_optional: !a.isOrganizer,
+                      }))
+                    });
+                  } catch (attErr) {
+                    // Ignore duplicate or constraint warnings
+                  }
+                }
               } else {
                 // Create new event imported from Titan into Legal Case Management
-                await prisma.calendarEvent.create({
+                const created = await prisma.calendarEvent.create({
                   data: {
                     title: parsed.summary,
                     description: parsed.description || null,
@@ -743,6 +804,22 @@ class TitanCalendarService {
                   },
                 });
                 createdCount++;
+
+                // Sync attendees for new event
+                if (parsed.attendees && parsed.attendees.length > 0) {
+                  try {
+                    await prisma.eventAttendee.createMany({
+                      data: parsed.attendees.map(a => ({
+                        event_id: created.id,
+                        email: a.email,
+                        status: a.status === 'accepted' ? 'accepted' : 'pending',
+                        is_optional: !a.isOrganizer,
+                      }))
+                    });
+                  } catch (attErr) {
+                    // Ignore duplicate or constraint warnings
+                  }
+                }
               }
             } catch (eventErr) {
               console.warn(`[Titan CalDAV] Error syncing event ${parsed.href}:`, eventErr.message);
