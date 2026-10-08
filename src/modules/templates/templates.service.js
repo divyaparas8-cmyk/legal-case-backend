@@ -156,44 +156,100 @@ const cloneToMatter = async (templateId, matterId, user, extraData = {}) => {
 
     let content = template.content || '';
 
+    const company = await tx.companyProfile.findFirst() || {};
+    const attorneyName = matter.assigned_lawyer?.full_name || company.owner_name || 'Victoria Tulsidas, Esq.';
+    const firmName = company.company_name || 'Victoria Tulsidas Law, A Professional Legal Corporation';
+    const firmAddress = company.address || company.address_line_1 ? [company.address_line_1 || company.address, company.city, company.state, company.postal_code].filter(Boolean).join(', ') : '750 San Vicente Blvd, Suite 800 West, West Hollywood, CA 90069';
+    const firmPhone = formatUSPhone(company.phone || '(310) 504-2359');
+    const firmEmail = company.email || 'vtulsidas@victoriatulsidaslaw.com';
+    const courtName = matter.court_name || 'Superior Court of California';
+    const courtAddress = matter.court_address || '111 N. Hill St., Los Angeles, CA 90012';
+    const judgeName = matter.judge_name || '';
+    const caseNum = matter.case_number || matter.matter_number || '';
+    const todayFormatted = formatPSTDate(new Date());
+
+    const clientFull = matter.client?.full_name || '';
+    const clientAddr = [
+      matter.client?.address_line_1 || matter.client?.home_address || matter.client?.address,
+      matter.client?.address_line_2,
+      [matter.client?.city, matter.client?.state, matter.client?.postal_code].filter(Boolean).join(', ')
+    ].filter(Boolean).join('\n') || '';
+
     // Standard Client & Matter Tags
-    content = content.replace(/{{client\.name}}/g, matter.client?.full_name || '');
-    content = content.replace(/{{client_name}}/g, matter.client?.full_name || '');
-    content = content.replace(/{{client\.address}}/g, matter.client?.home_address || matter.client?.address || '');
-    content = content.replace(/{{client\.phone}}/g, formatUSPhone(matter.client?.phone || ''));
-    content = content.replace(/{{client\.email}}/g, matter.client?.email || '');
+    content = content.replace(/{{client\.name}}/gi, clientFull);
+    content = content.replace(/{{client_name}}/gi, clientFull);
+    content = content.replace(/{{client\.address}}/gi, clientAddr);
+    content = content.replace(/{{client_address}}/gi, clientAddr);
+    content = content.replace(/{{client\.phone}}/gi, formatUSPhone(matter.client?.phone || ''));
+    content = content.replace(/{{client_phone}}/gi, formatUSPhone(matter.client?.phone || ''));
+    content = content.replace(/{{client\.email}}/gi, matter.client?.email || '');
+    content = content.replace(/{{client_email}}/gi, matter.client?.email || '');
 
     // Opposing Party & Counsel Tags
-    content = content.replace(/{{opposing_party\.name}}/g, defendantParty.full_name || defendantParty.name || matter.opposing_party || 'Opposing Party');
-    content = content.replace(/{{opposing_party}}/g, defendantParty.full_name || defendantParty.name || matter.opposing_party || 'Opposing Party');
-    content = content.replace(/{{opposing_counsel\.name}}/g, intake.opposing_counsel_name || 'Opposing Counsel');
+    const oppName = defendantParty.full_name || defendantParty.name || matter.opposing_party || matter.opposing_party_name || 'Opposing Party';
+    content = content.replace(/{{opposing_party\.name}}/gi, oppName);
+    content = content.replace(/{{opposing_party}}/gi, oppName);
+    content = content.replace(/{{defendant_name}}/gi, oppName);
+    content = content.replace(/{{defendant}}/gi, oppName);
+    content = content.replace(/{{opposing_counsel\.name}}/gi, intake.opposing_counsel_name || 'Opposing Counsel');
 
     // Insurance & Claims Tags
-    content = content.replace(/{{insurance\.company}}/g, intake.insurance_company || 'Insurance Carrier');
-    content = content.replace(/{{insurance\.claim_no}}/g, intake.claim_number || intake.insurance_claim_no || 'CLM-PENDING');
-    content = content.replace(/{{insurance\.policy_no}}/g, intake.policy_number || 'POL-PENDING');
+    content = content.replace(/{{insurance\.company}}/gi, intake.insurance_company || 'Insurance Carrier');
+    content = content.replace(/{{insurance\.claim_no}}/gi, intake.claim_number || intake.insurance_claim_no || 'CLM-PENDING');
+    content = content.replace(/{{insurance\.policy_no}}/gi, intake.policy_number || 'POL-PENDING');
 
     // Vehicles & Incidents Tags
-    content = content.replace(/{{vehicle\.make_model}}/g, firstVehicle.make ? `${firstVehicle.year || ''} ${firstVehicle.make} ${firstVehicle.model}` : 'Vehicle');
-    content = content.replace(/{{vehicle\.vin}}/g, firstVehicle.vin || 'VIN-PENDING');
-    content = content.replace(/{{vehicle\.license_plate}}/g, firstVehicle.license_plate || 'PLATE-PENDING');
-    content = content.replace(/{{incident\.date}}/g, matter.date_of_loss ? formatPSTDate(matter.date_of_loss) : 'Date of Loss');
+    content = content.replace(/{{vehicle\.make_model}}/gi, firstVehicle.make ? `${firstVehicle.year || ''} ${firstVehicle.make} ${firstVehicle.model}` : 'Vehicle');
+    content = content.replace(/{{vehicle\.vin}}/gi, firstVehicle.vin || 'VIN-PENDING');
+    content = content.replace(/{{vehicle\.license_plate}}/gi, firstVehicle.license_plate || 'PLATE-PENDING');
+    content = content.replace(/{{incident\.date}}/gi, matter.date_of_loss ? formatPSTDate(matter.date_of_loss) : 'Date of Loss');
 
     // Matter Info Tags
-    content = content.replace(/{{matter\.no}}/g, matter.matter_number || '');
-    content = content.replace(/{{matter_number}}/g, matter.matter_number || '');
-    content = content.replace(/{{case_number}}/g, matter.matter_number || '');
-    content = content.replace(/{{matter_title}}/g, matter.title || '');
-    content = content.replace(/{{lawyer_name}}/g, matter.assigned_lawyer?.full_name || '');
-    content = content.replace(/{{date}}/g, formatPSTDate(new Date()));
-    content = content.replace(/{{current_date}}/g, formatPSTDate(new Date()));
+    content = content.replace(/{{matter\.no}}/gi, matter.matter_number || caseNum);
+    content = content.replace(/{{matter_number}}/gi, matter.matter_number || caseNum);
+    content = content.replace(/{{MatterNumber}}/g, matter.matter_number || caseNum);
+    content = content.replace(/{{case_number}}/gi, caseNum);
+    content = content.replace(/{{CaseNumber}}/g, caseNum);
+    content = content.replace(/{{matter_title}}/gi, matter.title || '');
+    content = content.replace(/{{MatterTitle}}/g, matter.title || '');
 
-    const company = await tx.companyProfile.findFirst() || {};
-    content = content.replace(/{{firm_name}}/g, company.company_name || '');
-    content = content.replace(/{{firm_address}}/g, company.address || '');
-    content = content.replace(/{{firm_phone}}/g, formatUSPhone(company.phone || ''));
-    content = content.replace(/{{firm_email}}/g, company.email || '');
-    content = content.replace(/{{firm_logo}}/g, company.logo_url ? `<img src="${company.logo_url}" alt="Firm Logo" style="max-width:200px;" />` : '');
+    // Attorney & Law Firm Tags (both case styles)
+    content = content.replace(/{{attorney_name}}/gi, attorneyName);
+    content = content.replace(/{{AttorneyName}}/g, attorneyName);
+    content = content.replace(/{{assigned_lawyer_name}}/gi, attorneyName);
+    content = content.replace(/{{lawyer_name}}/gi, attorneyName);
+    content = content.replace(/{{LawyerName}}/g, attorneyName);
+    content = content.replace(/{{firm_name}}/gi, firmName);
+    content = content.replace(/{{FirmName}}/g, firmName);
+    content = content.replace(/{{firm_address}}/gi, firmAddress);
+    content = content.replace(/{{FirmAddress}}/g, firmAddress);
+    content = content.replace(/{{firm_phone}}/gi, firmPhone);
+    content = content.replace(/{{FirmPhone}}/g, firmPhone);
+    content = content.replace(/{{firm_email}}/gi, firmEmail);
+    content = content.replace(/{{FirmEmail}}/g, firmEmail);
+    content = content.replace(/{{firm_logo}}/gi, company.logo_url ? `<img src="${company.logo_url}" alt="Firm Logo" style="max-width:200px;" />` : '');
+
+    // Court & Judge Tags
+    content = content.replace(/{{court_name}}/gi, courtName);
+    content = content.replace(/{{CourtName}}/g, courtName);
+    content = content.replace(/{{court}}/gi, courtName);
+    content = content.replace(/{{Court}}/g, courtName);
+    content = content.replace(/{{court_address}}/gi, courtAddress);
+    content = content.replace(/{{CourtAddress}}/g, courtAddress);
+    content = content.replace(/{{judge}}/gi, judgeName);
+    content = content.replace(/{{Judge}}/g, judgeName);
+    content = content.replace(/{{judge_name}}/gi, judgeName);
+
+    // Recipient & Party Tags
+    content = content.replace(/{{PartyName}}/g, clientFull);
+    content = content.replace(/{{RecipientName}}/g, clientFull);
+    content = content.replace(/{{RecipientAddress}}/g, clientAddr);
+
+    // Date Tags
+    content = content.replace(/{{date}}/gi, todayFormatted);
+    content = content.replace(/{{current_date}}/gi, todayFormatted);
+    content = content.replace(/{{today_date}}/gi, todayFormatted);
+    content = content.replace(/{{TodayDate}}/g, todayFormatted);
 
     const draft = await tx.draft.create({
       data: {

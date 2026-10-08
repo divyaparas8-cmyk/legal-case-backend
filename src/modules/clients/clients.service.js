@@ -63,7 +63,15 @@ const create = async (data, user) => {
     throw err;
   }
 
-  const { email, full_name, password, party_type, party_role, organization_name, contact_first_name, contact_last_name, business_address, home_address, date_of_birth, government_id, insurance_number } = data;
+  const { email, full_name, password, party_type, party_role, organization_name, contact_first_name, contact_middle_name, contact_last_name, middle_name, business_address, home_address, date_of_birth, government_id, insurance_number } = data;
+
+  let calculatedFullName = full_name;
+  if (!calculatedFullName) {
+    const fn = data.firstName || data.first_name || contact_first_name || '';
+    const mn = data.middleName || middle_name || contact_middle_name || '';
+    const ln = data.lastName || data.last_name || contact_last_name || '';
+    calculatedFullName = [fn, mn, ln].filter(Boolean).join(' ');
+  }
 
   // Duplicate Check Rule (Priority: Phone -> Email -> GovID)
   if (!data.bypass_duplicate) {
@@ -86,7 +94,8 @@ const create = async (data, user) => {
     targetUser = await prisma.user.create({
       data: {
         email,
-        full_name,
+        full_name: calculatedFullName || email,
+        middle_name: middle_name || data.middleName || contact_middle_name || null,
         password_hash,
         role: 'client',
         must_reset_password: true,

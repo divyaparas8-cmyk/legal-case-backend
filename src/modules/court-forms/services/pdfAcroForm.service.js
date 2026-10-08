@@ -227,11 +227,15 @@ async function fillFields(buffer, fieldValuesMap = {}, formData = {}) {
           if (type === 'PDFTextField') {
             const sanitizedValue = sanitizeWinAnsiString(valueToFill);
             
-            // Auto-align text perfectly within the bounding box
-            field.setFontSize(0);
-            
-            if (sanitizedValue.includes('\\n')) {
+            // Standardize calibrated legal typography (avoids oversized 20-30pt text from font size 0)
+            const isMultiline = sanitizedValue.includes('\n') || sanitizedValue.includes('\\n') || sanitizedValue.length > 55;
+            if (isMultiline) {
               field.enableMultiline();
+              field.setFontSize(8.5);
+            } else if (sanitizedValue.length <= 10) {
+              field.setFontSize(9);
+            } else {
+              field.setFontSize(9.5);
             }
             
             const maxLength = field.getMaxLength();
@@ -242,20 +246,6 @@ async function fillFields(buffer, fieldValuesMap = {}, formData = {}) {
             }
             
             field.setText(finalValue);
-            
-            // Lock fixed attorney details so they cannot be edited in the PDF
-            if (sanitizedValue && (
-                sanitizedValue.includes('Victoria Tulsidas') || 
-                sanitizedValue.includes('365147') ||
-                sanitizedValue.includes('vtulsidas@victoriatulsidaslaw.com') ||
-                sanitizedValue.includes('750 San Vincente Blvd') ||
-                sanitizedValue === '90069' ||
-                sanitizedValue === '(310) 504-2359' ||
-                sanitizedValue === 'West Hollywood'
-            )) {
-                field.enableReadOnly();
-            }
-            
             filledCount++;
 //             console.log(`[PDF_ACROFORM_RUNTIME] Written Field "${fName}" = "${sanitizedValue}"`);
           } else if (type === 'PDFCheckBox') {

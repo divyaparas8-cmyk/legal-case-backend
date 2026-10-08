@@ -73,6 +73,7 @@ enum TrustTransactionType {
 model User {
   id            Int      @id @default(autoincrement())
   full_name     String
+  middle_name   String?
   email         String   @unique
   password_hash String
   role          Role     @default(client)
@@ -193,7 +194,9 @@ model Client {
   party_type        String   @default("Individual")
   party_role        String   @default("Client")
   organization_name String?
+  middle_name       String?
   contact_first_name String?
+  contact_middle_name String?
   contact_last_name String?
   business_address  String?
   home_address      String?
@@ -1021,6 +1024,7 @@ model MatterCommunication {
   description        String?  @db.LongText
   communication_date DateTime @default(now())
   contact_id         Int?
+  parent_id          Int?
   document_ids       Json?
   created_by         Int?
   created_at         DateTime @default(now())

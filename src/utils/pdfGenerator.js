@@ -26,6 +26,7 @@ exports.generateReportPDF = (report, res) => {
   const primaryColor = '#0B1F3A'; // Deep Navy
   const accentColor = '#38BDF8';  // Sky Blue
   const textGray = '#64748B';     // Slate Gray
+  const borderGray = '#E2E8F0';   // Light Border Gray
 
   // --- Header ---
   doc.fillColor(primaryColor).font('Helvetica-Bold').fontSize(22).text('VICTORIA TULSIDAS LAW', 50, 45);
@@ -64,7 +65,7 @@ exports.generateReportPDF = (report, res) => {
   const metrics = [
     { label: 'Leads Generated', value: data.leads ?? 0, icon: 'L' },
     { label: 'Matters Opened', value: data.matters ?? 0, icon: 'M' },
-    { label: 'Revenue (INR)', value: `₹${Number(data.revenue || 0).toLocaleString()}`, icon: 'R' },
+    { label: 'Revenue (USD)', value: `$${Number(data.revenue || 0).toLocaleString('en-US')}`, icon: 'R' },
     { label: 'Billable Hours', value: `${data.hours || 0}h`, icon: 'H' }
   ];
 

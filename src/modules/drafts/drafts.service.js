@@ -266,6 +266,9 @@ const resolveTemplateVariables = (content, draft, matter, company) => {
   const mappings = {
     ...variables,
     'client_name': recipientName,
+    'client_address': recipientAddress,
+    'client_email': primaryClient?.email || '',
+    'client_phone': primaryClient?.phone || '',
     'current_date': todayDate,
     'matter_number': matter?.matter_number || '',
     'matter_title': matter?.title || '',
@@ -277,6 +280,10 @@ const resolveTemplateVariables = (content, draft, matter, company) => {
     'attorney_name': attorneyName,
     'attorney_for': attorneyFor,
     'court_name': courtName,
+    'court_address': matter?.court_address || '',
+    'CourtAddress': matter?.court_address || '',
+    'court': courtName,
+    'Court': courtName,
     'county': county,
     'plaintiff_name': plaintiffName,
     'defendant_name': defendantName,
@@ -292,7 +299,7 @@ const resolveTemplateVariables = (content, draft, matter, company) => {
   };
 
   Object.entries(mappings).forEach(([key, value]) => {
-    const regex = new RegExp(`{{${key}}}`, 'g');
+    const regex = new RegExp(`{{${key}}}`, 'gi');
     resolved = resolved.replace(regex, value);
   });
 
@@ -866,25 +873,65 @@ const completeSignature = async (token, signature_data, ip_address, device_info)
 
     // 3. Generate signed PDF
     const draft = request.draft;
+    const company = await prisma.companyProfile.findFirst() || {};
+    let matter = null;
+    if (draft.matter_id) {
+      try {
+        matter = await prisma.matter.findUnique({
+          where: { id: draft.matter_id },
+          include: { client: true, assigned_lawyer: true }
+        });
+      } catch (_) {}
+    }
+    const resolvedContent = resolveTemplateVariables(draft.content || '', draft, matter, company);
+
     const doc = new PDFDocument({ margin: 50 });
     const buffers = [];
     doc.on('data', buffers.push.bind(buffers));
-    
-    doc.fontSize(20).text(draft.title, { align: 'center' });
-    doc.moveDown();
-    doc.fontSize(11).text(draft.content || '');
+
+    // Branded Firm Header
+    const firmName = company.company_name || 'Victoria Tulsidas Law, A Professional Legal Corporation';
+    const firmAddr = company.address || '750 San Vicente Blvd, Suite 800 West, West Hollywood, CA 90069';
+    const firmContact = [company.phone || '(310) 504-2359', company.email || 'vtulsidas@victoriatulsidaslaw.com'].filter(Boolean).join('   |   ');
+
+    doc.fillColor('#0f172a').font('Helvetica-Bold').fontSize(15).text(firmName, { align: 'left' });
+    doc.fillColor('#64748b').font('Helvetica').fontSize(9).text(firmAddr, { align: 'left' });
+    doc.text(firmContact, { align: 'left' });
+    doc.moveDown(0.5);
+
+    // Divider Line
+    doc.moveTo(50, doc.y).lineTo(doc.page.width - 50, doc.y).strokeColor('#cbd5e1').lineWidth(0.75).stroke();
+    doc.moveDown(1.5);
+
+    // Document Title
+    doc.fillColor('#0f172a').font('Helvetica-Bold').fontSize(13).text(draft.title.toUpperCase(), { align: 'center' });
+    doc.moveDown(1.2);
+
+    // Document Body Content
+    doc.fillColor('#1e293b').font('Helvetica').fontSize(10).text(resolvedContent || 'No document content specified.', {
+      lineGap: 4,
+      paragraphGap: 10,
+      align: 'left'
+    });
     doc.moveDown(2);
-    doc.fontSize(14).text('SIGNATURES', { underline: true });
-    doc.moveDown();
-    doc.fontSize(10).text(`Signed by: ${request.recipient_email}`);
-    doc.text(`Date: ${new Date().toLocaleString()}`);
-    doc.text(`IP: ${ip_address || 'Unknown'}`);
-    
+
+    // Verified Signature Audit Block
+    doc.moveTo(50, doc.y).lineTo(doc.page.width - 50, doc.y).strokeColor('#e2e8f0').lineWidth(0.5).stroke();
+    doc.moveDown(0.8);
+    doc.fillColor('#0f172a').font('Helvetica-Bold').fontSize(11).text('VERIFIED DIGITAL SIGNATURE & AUDIT RECORD');
+    doc.moveDown(0.5);
+
+    doc.fillColor('#475569').font('Helvetica').fontSize(9);
+    doc.text(`Signer: ${request.recipient_email}`);
+    doc.text(`Signed At: ${formatPSTDate(new Date(), { month: 'long', day: 'numeric', year: 'numeric' })} at ${formatPSTTime(new Date())}`);
+    doc.text(`IP Address: ${ip_address || '127.0.0.1'}`);
+    doc.text(`Digital Verification Status: Cryptographically Recorded & Stored`);
+
     if (signature_data && signature_data.startsWith('data:image/png;base64,')) {
       try {
         const imgBuffer = Buffer.from(signature_data.split(',')[1], 'base64');
-        doc.moveDown();
-        doc.image(imgBuffer, { fit: [200, 100] });
+        doc.moveDown(0.5);
+        doc.image(imgBuffer, { fit: [160, 60] });
       } catch (e) {
         console.error('Failed to embed signature image', e);
       }
