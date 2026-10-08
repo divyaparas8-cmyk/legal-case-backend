@@ -152,8 +152,6 @@ exports.deleteCategory = async (req, res, next) => {
   }
 };
 
-const titanCalendarService = require('../settings/titan-calendar.service');
-
 exports.getIcsFeed = async (req, res, next) => {
   try {
     const rawEvents = await prisma.calendarEvent.findMany({
