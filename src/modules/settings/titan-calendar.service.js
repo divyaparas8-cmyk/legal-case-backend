@@ -682,7 +682,8 @@ class TitanCalendarService {
    * Incoming sync: Titan Calendar -> Legal Case Management
    * Pulls events created, updated, or deleted across ALL Titan calendar collections into Legal Case Management
    */
-  async syncFromTitan(userId = 1) {
+  async syncFromTitan(userId = 1, options = {}) {
+    const forceFull = options.forceFull === true;
     try {
       const settings = await this.getSettings();
       if (!settings.enabled || !settings.email || !settings.password) {
@@ -690,7 +691,7 @@ class TitanCalendarService {
       }
 
       const collections = await this.getCalendarCollections(settings);
-      console.log(`[Titan CalDAV] Starting sync across ${collections.length} calendar collections: ${collections.map(c => c.path).join(', ')}`);
+      console.log(`[Titan CalDAV] Starting sync across ${collections.length} collections (forceFull: ${forceFull}): ${collections.map(c => c.path).join(', ')}`);
 
       let totalTitanEvents = 0;
       let createdCount = 0;
@@ -703,131 +704,8 @@ class TitanCalendarService {
           totalTitanEvents += itemHrefs.length;
           const activeHrefsSet = new Set(itemHrefs);
 
-          const parsedEvents = await this.batchFetchEvents(settings, col.path, itemHrefs);
-
-          for (const parsed of parsedEvents) {
-            try {
-              if (!parsed.summary || parsed.status === 'cancelled') {
-                if (parsed.href) {
-                  const existingCancelled = await prisma.calendarEvent.findFirst({
-                    where: { titan_event_id: parsed.href }
-                  });
-                  if (existingCancelled) {
-                    await prisma.calendarEvent.delete({ where: { id: existingCancelled.id } });
-                    deletedCount++;
-                  }
-                }
-                continue;
-              }
-
-              // 1. Match by titan_event_id
-              let existing = await prisma.calendarEvent.findFirst({
-                where: { titan_event_id: parsed.href },
-              });
-
-              // 2. Match by LCM UID (lcm-evt-${id}@...)
-              if (!existing && parsed.uid && parsed.uid.startsWith('lcm-evt-')) {
-                const lcmMatch = parsed.uid.match(/^lcm-evt-(\d+)/);
-                if (lcmMatch) {
-                  const lcmId = parseInt(lcmMatch[1], 10);
-                  existing = await prisma.calendarEvent.findUnique({ where: { id: lcmId } });
-                }
-              }
-
-              // 3. Match unlinked event with same title and same start time (within 60s)
-              if (!existing && parsed.dtstart) {
-                const windowStart = new Date(parsed.dtstart.getTime() - 60000);
-                const windowEnd = new Date(parsed.dtstart.getTime() + 60000);
-                existing = await prisma.calendarEvent.findFirst({
-                  where: {
-                    title: parsed.summary,
-                    titan_event_id: null,
-                    event_date: { gte: windowStart, lte: windowEnd },
-                  }
-                });
-              }
-
-              if (existing) {
-                // Check if any field changed
-                const titleChanged = existing.title !== parsed.summary;
-                const descChanged = parsed.description && existing.description !== parsed.description;
-                const dateChanged = parsed.dtstart && Math.abs(existing.event_date.getTime() - parsed.dtstart.getTime()) > 1000;
-                const endDateChanged = parsed.dtend && (!existing.end_date || Math.abs(existing.end_date.getTime() - parsed.dtend.getTime()) > 1000);
-                const locChanged = parsed.location && existing.location !== parsed.location;
-                const idMissing = existing.titan_event_id !== parsed.href;
-
-                if (titleChanged || descChanged || dateChanged || endDateChanged || locChanged || idMissing) {
-                  await prisma.calendarEvent.update({
-                    where: { id: existing.id },
-                    data: {
-                      title: parsed.summary,
-                      description: parsed.description || existing.description,
-                      event_date: parsed.dtstart || existing.event_date,
-                      end_date: parsed.dtend || existing.end_date,
-                      location: parsed.location || existing.location,
-                      titan_event_id: parsed.href,
-                    },
-                  });
-                  updatedCount++;
-                }
-
-                // Sync attendees for existing event
-                if (parsed.attendees && parsed.attendees.length > 0) {
-                  try {
-                    await prisma.eventAttendee.deleteMany({ where: { event_id: existing.id } });
-                    await prisma.eventAttendee.createMany({
-                      data: parsed.attendees.map(a => ({
-                        event_id: existing.id,
-                        email: a.email,
-                        status: a.status === 'accepted' ? 'accepted' : 'pending',
-                        is_optional: !a.isOrganizer,
-                      }))
-                    });
-                  } catch (attErr) {
-                    // Ignore duplicate or constraint warnings
-                  }
-                }
-              } else {
-                // Create new event imported from Titan into Legal Case Management
-                const created = await prisma.calendarEvent.create({
-                  data: {
-                    title: parsed.summary,
-                    description: parsed.description || null,
-                    event_date: parsed.dtstart || new Date(),
-                    end_date: parsed.dtend || null,
-                    location: parsed.location || null,
-                    type: 'general',
-                    court_related: false,
-                    created_by: userId || 1,
-                    titan_event_id: parsed.href,
-                    timezone: PACIFIC_TIMEZONE,
-                  },
-                });
-                createdCount++;
-
-                // Sync attendees for new event
-                if (parsed.attendees && parsed.attendees.length > 0) {
-                  try {
-                    await prisma.eventAttendee.createMany({
-                      data: parsed.attendees.map(a => ({
-                        event_id: created.id,
-                        email: a.email,
-                        status: a.status === 'accepted' ? 'accepted' : 'pending',
-                        is_optional: !a.isOrganizer,
-                      }))
-                    });
-                  } catch (attErr) {
-                    // Ignore duplicate or constraint warnings
-                  }
-                }
-              }
-            } catch (eventErr) {
-              console.warn(`[Titan CalDAV] Error syncing event ${parsed.href}:`, eventErr.message);
-            }
-          }
-
-          // Deletion detection for this collection:
-          // Remove any LCM event previously linked to this collection that no longer exists on Titan
+          // 1. Immediate Deletion Detection:
+          // Remove any LCM event previously linked to this collection that is no longer in Titan
           const dbEventsForCol = await prisma.calendarEvent.findMany({
             where: {
               titan_event_id: { startsWith: col.path }
@@ -835,13 +713,148 @@ class TitanCalendarService {
             select: { id: true, titan_event_id: true, title: true }
           });
 
+          const existingDbHrefSet = new Set(dbEventsForCol.map(e => e.titan_event_id));
+
           for (const dbEvt of dbEventsForCol) {
             if (!activeHrefsSet.has(dbEvt.titan_event_id)) {
               console.log(`[Titan CalDAV] Event #${dbEvt.id} ("${dbEvt.title}") was deleted from Titan collection ${col.path}. Removing from LCM.`);
-              await prisma.calendarEvent.delete({
-                where: { id: dbEvt.id }
-              });
-              deletedCount++;
+              try {
+                await prisma.calendarEvent.delete({
+                  where: { id: dbEvt.id }
+                });
+                deletedCount++;
+              } catch (delErr) {
+                console.warn(`[Titan CalDAV] Error deleting #${dbEvt.id}:`, delErr.message);
+              }
+            }
+          }
+
+          // 2. Determine which items need to be fetched:
+          const newHrefs = itemHrefs.filter(h => !existingDbHrefSet.has(h));
+          const hrefsToFetch = forceFull ? itemHrefs : newHrefs;
+
+          if (hrefsToFetch.length > 0) {
+            const parsedEvents = await this.batchFetchEvents(settings, col.path, hrefsToFetch);
+
+            for (const parsed of parsedEvents) {
+              try {
+                if (!parsed.summary || parsed.status === 'cancelled') {
+                  if (parsed.href) {
+                    const existingCancelled = await prisma.calendarEvent.findFirst({
+                      where: { titan_event_id: parsed.href }
+                    });
+                    if (existingCancelled) {
+                      await prisma.calendarEvent.delete({ where: { id: existingCancelled.id } });
+                      deletedCount++;
+                    }
+                  }
+                  continue;
+                }
+
+                // 1. Match by titan_event_id
+                let existing = await prisma.calendarEvent.findFirst({
+                  where: { titan_event_id: parsed.href },
+                });
+
+                // 2. Match by LCM UID (lcm-evt-${id}@...)
+                if (!existing && parsed.uid && parsed.uid.startsWith('lcm-evt-')) {
+                  const lcmMatch = parsed.uid.match(/^lcm-evt-(\d+)/);
+                  if (lcmMatch) {
+                    const lcmId = parseInt(lcmMatch[1], 10);
+                    existing = await prisma.calendarEvent.findUnique({ where: { id: lcmId } });
+                  }
+                }
+
+                // 3. Match unlinked event with same title and same start time (within 60s)
+                if (!existing && parsed.dtstart) {
+                  const windowStart = new Date(parsed.dtstart.getTime() - 60000);
+                  const windowEnd = new Date(parsed.dtstart.getTime() + 60000);
+                  existing = await prisma.calendarEvent.findFirst({
+                    where: {
+                      title: parsed.summary,
+                      titan_event_id: null,
+                      event_date: { gte: windowStart, lte: windowEnd },
+                    }
+                  });
+                }
+
+                if (existing) {
+                  // Check if any field changed
+                  const titleChanged = existing.title !== parsed.summary;
+                  const descChanged = parsed.description && existing.description !== parsed.description;
+                  const dateChanged = parsed.dtstart && Math.abs(existing.event_date.getTime() - parsed.dtstart.getTime()) > 1000;
+                  const endDateChanged = parsed.dtend && (!existing.end_date || Math.abs(existing.end_date.getTime() - parsed.dtend.getTime()) > 1000);
+                  const locChanged = parsed.location && existing.location !== parsed.location;
+                  const idMissing = existing.titan_event_id !== parsed.href;
+
+                  if (titleChanged || descChanged || dateChanged || endDateChanged || locChanged || idMissing) {
+                    await prisma.calendarEvent.update({
+                      where: { id: existing.id },
+                      data: {
+                        title: parsed.summary,
+                        description: parsed.description || existing.description,
+                        event_date: parsed.dtstart || existing.event_date,
+                        end_date: parsed.dtend || existing.end_date,
+                        location: parsed.location || existing.location,
+                        titan_event_id: parsed.href,
+                      },
+                    });
+                    updatedCount++;
+                  }
+
+                  // Sync attendees for existing event
+                  if (parsed.attendees && parsed.attendees.length > 0) {
+                    try {
+                      await prisma.eventAttendee.deleteMany({ where: { event_id: existing.id } });
+                      await prisma.eventAttendee.createMany({
+                        data: parsed.attendees.map(a => ({
+                          event_id: existing.id,
+                          email: a.email,
+                          status: a.status === 'accepted' ? 'accepted' : 'pending',
+                          is_optional: !a.isOrganizer,
+                        }))
+                      });
+                    } catch (attErr) {
+                      // Ignore duplicate or constraint warnings
+                    }
+                  }
+                } else {
+                  // Create new event imported from Titan into Legal Case Management
+                  const created = await prisma.calendarEvent.create({
+                    data: {
+                      title: parsed.summary,
+                      description: parsed.description || null,
+                      event_date: parsed.dtstart || new Date(),
+                      end_date: parsed.dtend || null,
+                      location: parsed.location || null,
+                      type: 'general',
+                      court_related: false,
+                      created_by: userId || 1,
+                      titan_event_id: parsed.href,
+                      timezone: PACIFIC_TIMEZONE,
+                    },
+                  });
+                  createdCount++;
+
+                  // Sync attendees for new event
+                  if (parsed.attendees && parsed.attendees.length > 0) {
+                    try {
+                      await prisma.eventAttendee.createMany({
+                        data: parsed.attendees.map(a => ({
+                          event_id: created.id,
+                          email: a.email,
+                          status: a.status === 'accepted' ? 'accepted' : 'pending',
+                          is_optional: !a.isOrganizer,
+                        }))
+                      });
+                    } catch (attErr) {
+                      // Ignore duplicate or constraint warnings
+                    }
+                  }
+                }
+              } catch (eventErr) {
+                console.warn(`[Titan CalDAV] Error syncing event ${parsed.href}:`, eventErr.message);
+              }
             }
           }
         } catch (colErr) {

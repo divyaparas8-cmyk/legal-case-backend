@@ -1,7 +1,25 @@
 const calendarService = require('./calendar.service');
+const titanCalendarService = require('../settings/titan-calendar.service');
+
+let lastTitanSync = 0;
+let isSyncing = false;
 
 exports.getEvents = async (req, res, next) => {
   try {
+    const now = Date.now();
+    // Fast automatic sync if > 6 seconds since last sync and not already in flight
+    if (now - lastTitanSync > 6000 && !isSyncing) {
+      isSyncing = true;
+      try {
+        await titanCalendarService.syncFromTitan(req.user?.id || 1, { forceFull: false });
+        lastTitanSync = Date.now();
+      } catch (syncErr) {
+        console.warn('[Auto-sync from Titan CalDAV]:', syncErr.message);
+      } finally {
+        isSyncing = false;
+      }
+    }
+
     const data = await calendarService.getAllEvents();
     res.status(200).json({ data });
   } catch (error) {
