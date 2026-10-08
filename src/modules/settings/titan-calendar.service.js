@@ -28,6 +28,7 @@ const {
 class TitanCalendarService {
   constructor() {
     this._primaryCalendarPath = null;
+    this._collections = null;
   }
 
   /**
@@ -114,10 +115,12 @@ class TitanCalendarService {
   }
 
   /**
-   * Discover primary calendar collection path
+   * Discover ALL available CalDAV calendar collections for the account
    */
-  async getPrimaryCalendarPath(settings) {
-    if (this._primaryCalendarPath) return this._primaryCalendarPath;
+  async getCalendarCollections(settings) {
+    if (this._collections && this._collections.length > 0) {
+      return this._collections;
+    }
 
     try {
       const homeSetXml = `<?xml version="1.0" encoding="utf-8" ?><D:propfind xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav"><D:prop><C:calendar-home-set /></D:prop></D:propfind>`;
@@ -129,38 +132,81 @@ class TitanCalendarService {
 
       let homePath = `/principals/${settings.email}/calendar`;
       if (pRes.status === 207) {
-        const homeMatch = pRes.body.match(/<L:calendar-home-set>[\s\S]*?<D:href>([^<]+)<\/D:href>/) ||
-                          pRes.body.match(/<C:calendar-home-set>[\s\S]*?<D:href>([^<]+)<\/D:href>/);
+        const homeMatch = pRes.body.match(/<[^:]*:calendar-home-set[^>]*>[\s\S]*?<[^:]*:href[^>]*>([^<]+)<\/[^:]*:href>/i);
         if (homeMatch) homePath = homeMatch[1].replace(/\/+$/, '');
       }
 
-      const listXml = `<?xml version="1.0" encoding="utf-8" ?><D:propfind xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav"><D:prop><D:resourcetype /><D:displayname /></D:prop></D:propfind>`;
+      const listXml = `<?xml version="1.0" encoding="utf-8" ?><D:propfind xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav" xmlns:A="http://apple.com/ns/ical/"><D:prop><D:resourcetype /><D:displayname /><C:supported-calendar-component-set /><C:calendar-description /><A:calendar-order /></D:prop></D:propfind>`;
       const cRes = await this._httpRequest(settings, {
         path: homePath,
         method: 'PROPFIND',
         headers: { 'Depth': '1', 'Content-Type': 'application/xml; charset=utf-8' },
       }, listXml);
 
+      const collections = [];
       if (cRes.status === 207) {
-        const responses = cRes.body.split('</D:response>');
+        const responses = cRes.body.split(/<\/?D:response>/i).filter(s => s.trim().length > 10);
         for (const resp of responses) {
-          if (resp.includes('<L:calendar') || resp.includes('<C:calendar')) {
-            const hrefMatch = resp.match(/<D:href>([^<]+)<\/D:href>/);
-            if (hrefMatch && hrefMatch[1] !== homePath && hrefMatch[1] !== `${homePath}/`) {
-              this._primaryCalendarPath = hrefMatch[1].replace(/\/+$/, '');
-              return this._primaryCalendarPath;
-            }
+          const isCal = /<C:calendar\s*\/?>|<L:calendar\s*\/?>/i.test(resp);
+          const hrefM = resp.match(/<D:href>([^<]+)<\/D:href>/i);
+          if (isCal && hrefM) {
+            const href = hrefM[1].replace(/\/+$/, '');
+            const dispM = resp.match(/<D:displayname>([^<]*)<\/D:displayname>/i);
+            const descM = resp.match(/<[^:]*:calendar-description>([^<]*)<\/[^:]*:calendar-description>/i);
+            const orderM = resp.match(/<[^:]*:calendar-order>([^<]*)<\/[^:]*:calendar-order>/i);
+            const name = dispM ? dispM[1].trim() : '';
+            const desc = descM ? descM[1].trim() : '';
+            const order = orderM ? parseInt(orderM[1], 10) : 999;
+            const isPrimary = name === settings.email || desc.includes('Home Calendar') || href.endsWith('8748091');
+            collections.push({
+              path: href,
+              displayName: name || href.split('/').pop(),
+              description: desc,
+              order,
+              isPrimary
+            });
           }
         }
       }
 
-      this._primaryCalendarPath = `${homePath}/8748091`;
-      return this._primaryCalendarPath;
+      if (collections.length === 0) {
+        collections.push({
+          path: `${homePath}/8748091`,
+          displayName: settings.email,
+          description: 'Default Calendar',
+          order: 1,
+          isPrimary: true
+        });
+      }
+
+      // Sort primary calendar first
+      collections.sort((a, b) => (b.isPrimary ? 1 : 0) - (a.isPrimary ? 1 : 0));
+      this._collections = collections;
+      this._primaryCalendarPath = collections[0].path;
+      return collections;
     } catch (err) {
-      console.warn('[Titan Calendar] Error discovering primary calendar path, using default:', err.message);
-      this._primaryCalendarPath = `/principals/${settings.email}/calendar/8748091`;
-      return this._primaryCalendarPath;
+      console.warn('[Titan Calendar] Error discovering collections:', err.message);
+      const fallback = `/principals/${settings.email}/calendar/8748091`;
+      this._primaryCalendarPath = fallback;
+      return [{
+        path: fallback,
+        displayName: settings.email,
+        description: 'Fallback Calendar',
+        order: 1,
+        isPrimary: true
+      }];
     }
+  }
+
+  /**
+   * Discover primary calendar collection path
+   */
+  async getPrimaryCalendarPath(settings) {
+    if (this._primaryCalendarPath) return this._primaryCalendarPath;
+    const cols = await this.getCalendarCollections(settings);
+    const primary = cols.find(c => c.isPrimary) || cols[0];
+    this._primaryCalendarPath = primary?.path || `/principals/${settings.email}/calendar/8748091`;
+    return this._primaryCalendarPath;
   }
 
   /**
@@ -178,6 +224,83 @@ class TitanCalendarService {
     if (res.status !== 207) return [];
     const hrefs = [...res.body.matchAll(/<D:href>([^<]+)<\/D:href>/g)].map(m => m[1]);
     return hrefs.filter(h => h.endsWith('.ics'));
+  }
+
+  /**
+   * Batch fetch event bodies using RFC 4791 calendar-multiget (with fallback to individual GETs)
+   */
+  async batchFetchEvents(settings, colPath, itemHrefs) {
+    if (!itemHrefs || itemHrefs.length === 0) return [];
+
+    const results = [];
+    const chunkSize = 50;
+
+    for (let i = 0; i < itemHrefs.length; i += chunkSize) {
+      const chunk = itemHrefs.slice(i, i + chunkSize);
+      const multigetXml = `<?xml version="1.0" encoding="utf-8" ?>
+<C:calendar-multiget xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">
+  <D:prop>
+    <D:getetag/>
+    <C:calendar-data/>
+  </D:prop>
+  ${chunk.map(h => `<D:href>${h}</D:href>`).join('\n  ')}
+</C:calendar-multiget>`;
+
+      let multigetOk = false;
+      try {
+        const mgRes = await this._httpRequest(settings, {
+          path: colPath,
+          method: 'REPORT',
+          headers: { 'Depth': '1', 'Content-Type': 'application/xml; charset=utf-8' }
+        }, multigetXml);
+
+        if (mgRes.status === 207) {
+          multigetOk = true;
+          const itemResps = mgRes.body.split(/<\/?D:response>/i).filter(s => s.trim().length > 10);
+          for (const iResp of itemResps) {
+            const hrefMatch = iResp.match(/<D:href>([^<]+)<\/D:href>/i);
+            const dataMatch = iResp.match(/<[^:]*:calendar-data>([\s\S]*?)<\/[^:]*:calendar-data>/i);
+            const etagMatch = iResp.match(/<D:getetag>([^<]+)<\/D:getetag>/i);
+            if (hrefMatch && dataMatch) {
+              const rawIcs = dataMatch[1]
+                .replace(/&#13;/g, '\r')
+                .replace(/&lt;/g, '<')
+                .replace(/&gt;/g, '>')
+                .replace(/&amp;/g, '&');
+              const parsed = this.parseIcsEvent(rawIcs);
+              if (parsed) {
+                parsed.href = hrefMatch[1].trim();
+                parsed.etag = etagMatch ? etagMatch[1].trim().replace(/^"|"$/g, '') : null;
+                results.push(parsed);
+              }
+            }
+          }
+        }
+      } catch (e) {
+        console.warn(`[Titan CalDAV] Multiget chunk failed, falling back to individual GETs: ${e.message}`);
+      }
+
+      // Fallback: if multiget failed, fetch individual items in chunk
+      if (!multigetOk) {
+        for (const href of chunk) {
+          try {
+            const getRes = await this._httpRequest(settings, { path: href, method: 'GET' });
+            if (getRes.status === 200) {
+              const parsed = this.parseIcsEvent(getRes.body);
+              if (parsed) {
+                parsed.href = href;
+                parsed.etag = getRes.headers?.etag ? getRes.headers.etag.replace(/^"|"$/g, '') : null;
+                results.push(parsed);
+              }
+            }
+          } catch (itemErr) {
+            console.warn(`[Titan CalDAV] Error getting item ${href}: ${itemErr.message}`);
+          }
+        }
+      }
+    }
+
+    return results;
   }
 
   /**
@@ -204,8 +327,9 @@ class TitanCalendarService {
       }, propfindXml);
 
       if (res.status === 200 || res.status === 207) {
-        const calPath = await this.getPrimaryCalendarPath(settings);
-        const items = await this.getCalendarItems(settings, calPath);
+        const collections = await this.getCalendarCollections(settings);
+        const primary = collections.find(c => c.isPrimary) || collections[0];
+        const primaryItems = await this.getCalendarItems(settings, primary.path);
 
         return {
           success: true,
@@ -213,9 +337,10 @@ class TitanCalendarService {
           status: res.status,
           caldav_host: settings.host,
           principal: principalPath,
-          primary_calendar: calPath,
-          items_count: items.length,
-          message: `Successfully connected and authenticated with Titan CalDAV (${settings.host}). Found ${items.length} calendar events.`,
+          collections: collections.map(c => ({ path: c.path, name: c.displayName, isPrimary: c.isPrimary })),
+          primary_calendar: primary.path,
+          items_count: primaryItems.length,
+          message: `Successfully connected and authenticated with Titan CalDAV (${settings.host}). Discovered ${collections.length} calendar collections.`,
         };
       } else if (res.status === 401 || res.status === 403) {
         return {
@@ -378,6 +503,7 @@ class TitanCalendarService {
    * Parse a single VEVENT from an iCalendar string
    */
   parseIcsEvent(icsData) {
+    if (!icsData) return null;
     const veventMatch = icsData.match(/BEGIN:VEVENT[\s\S]*?END:VEVENT/i);
     const eventBlock = veventMatch ? veventMatch[0] : icsData;
     const unfolded = eventBlock.replace(/\r\n[ \t]/g, '').replace(/\n[ \t]/g, '');
@@ -395,14 +521,16 @@ class TitanCalendarService {
     };
 
     const uid = getProp('UID');
-    const summary = (getProp('SUMMARY') || 'Titan Event').replace(/\\([,;\\])/g, '$1');
-    const description = (getProp('DESCRIPTION') || '').replace(/\\n/g, '\n').replace(/\\([,;\\])/g, '$1');
-    const location = (getProp('LOCATION') || '').replace(/\\([,;\\])/g, '$1');
+    const summary = (getProp('SUMMARY') || 'Titan Event').replace(/\\([,;\\])/g, '$1').trim();
+    const description = (getProp('DESCRIPTION') || '').replace(/\\n/g, '\n').replace(/\\([,;\\])/g, '$1').trim();
+    const location = (getProp('LOCATION') || '').replace(/\\([,;\\])/g, '$1').trim();
     const dtstart = parseCalDavDate(getPropLine('DTSTART') || getProp('DTSTART'));
     const dtend = parseCalDavDate(getPropLine('DTEND') || getProp('DTEND'));
     const status = (getProp('STATUS') || 'CONFIRMED').toLowerCase();
+    const rrule = getProp('RRULE');
+    const lastModified = parseCalDavDate(getPropLine('LAST-MODIFIED') || getProp('LAST-MODIFIED'));
 
-    return { uid, summary, description, location, dtstart, dtend, status };
+    return { uid, summary, description, location, dtstart, dtend, status, rrule, lastModified };
   }
 
   /**
@@ -416,7 +544,6 @@ class TitanCalendarService {
         return { success: false, reason: 'unconfigured' };
       }
 
-      const calPath = await this.getPrimaryCalendarPath(settings);
       const uid = `lcm-evt-${calendarEvent.id}@victoriatulsidaslaw.com`;
       const icsData = this.buildIcsEvent(uid, calendarEvent, settings.email);
 
@@ -429,17 +556,20 @@ class TitanCalendarService {
           headers: { 'Content-Type': 'text/calendar; charset=utf-8' },
         }, icsData);
 
-        if (updateRes.status === 200 || updateRes.status === 204) {
+        if (updateRes.status === 200 || updateRes.status === 201 || updateRes.status === 204) {
           console.log(`[Titan CalDAV] Event #${calendarEvent.id} successfully updated on Titan.`);
           return { success: true, action: 'updated', titan_event_id: calendarEvent.titan_event_id };
+        } else {
+          console.warn(`[Titan CalDAV] Failed to update event #${calendarEvent.id} on Titan. HTTP ${updateRes.status}`);
+          return { success: false, status: updateRes.status };
         }
       }
 
-      // Case 2: New event -> CREATE on Titan and capture the real Titan resource URL
-      console.log(`[Titan CalDAV] Creating new event #${calendarEvent.id} on Titan CalDAV collection: ${calPath}`);
-      const itemsBefore = await this.getCalendarItems(settings, calPath);
-
+      // Case 2: New event -> CREATE on Titan in primary calendar collection
+      const calPath = await this.getPrimaryCalendarPath(settings);
       const targetPath = `${calPath}/lcm-evt-${calendarEvent.id}.ics`;
+      console.log(`[Titan CalDAV] Creating new event #${calendarEvent.id} on Titan CalDAV collection: ${targetPath}`);
+
       const putRes = await this._httpRequest(settings, {
         path: targetPath,
         method: 'PUT',
@@ -447,40 +577,15 @@ class TitanCalendarService {
       }, icsData);
 
       if (putRes.status === 201 || putRes.status === 200 || putRes.status === 204) {
-        // Find the created resource path in the collection
-        const itemsAfter = await this.getCalendarItems(settings, calPath);
-        const newItems = itemsAfter.filter(h => !itemsBefore.includes(h));
-
-        let realHref = null;
-        for (const candidate of newItems) {
-          try {
-            const checkRes = await this._httpRequest(settings, { path: candidate, method: 'GET' });
-            if (checkRes.body.includes(uid)) {
-              realHref = candidate;
-              break;
-            }
-          } catch (e) {
-            // ignore
-          }
-        }
-
-        if (!realHref && newItems.length > 0) {
-          realHref = newItems[newItems.length - 1];
-        }
-
-        if (!realHref) {
-          realHref = targetPath;
-        }
-
-        console.log(`[Titan CalDAV] Event #${calendarEvent.id} created. Titan resource href: ${realHref}`);
+        console.log(`[Titan CalDAV] Event #${calendarEvent.id} successfully created on Titan at ${targetPath}`);
 
         // Persist real Titan resource ID to DB
         await prisma.calendarEvent.update({
           where: { id: calendarEvent.id },
-          data: { titan_event_id: realHref },
+          data: { titan_event_id: targetPath },
         });
 
-        return { success: true, action: 'created', titan_event_id: realHref };
+        return { success: true, action: 'created', titan_event_id: targetPath };
       } else {
         console.error(`[Titan CalDAV] Failed to create event #${calendarEvent.id}. HTTP status: ${putRes.status}`);
         return { success: false, status: putRes.status };
@@ -502,12 +607,12 @@ class TitanCalendarService {
         return { success: false, reason: 'unconfigured' };
       }
 
-      const calPath = await this.getPrimaryCalendarPath(settings);
       const event = await prisma.calendarEvent.findUnique({
         where: { id: parseInt(eventId, 10) },
         select: { id: true, titan_event_id: true },
       });
 
+      const calPath = await this.getPrimaryCalendarPath(settings);
       const targetPath = event?.titan_event_id || `${calPath}/lcm-evt-${eventId}.ics`;
       console.log(`[Titan CalDAV] Deleting event #${eventId} from Titan: ${targetPath}`);
 
@@ -517,7 +622,7 @@ class TitanCalendarService {
       });
 
       if (delRes.status === 200 || delRes.status === 204 || delRes.status === 404) {
-        console.log(`[Titan CalDAV] Event #${eventId} successfully removed from Titan.`);
+        console.log(`[Titan CalDAV] Event #${eventId} successfully removed from Titan (HTTP ${delRes.status}).`);
         return { success: true, status: delRes.status };
       } else {
         console.warn(`[Titan CalDAV] DELETE returned unexpected status: ${delRes.status}`);
@@ -531,7 +636,7 @@ class TitanCalendarService {
 
   /**
    * Incoming sync: Titan Calendar -> Legal Case Management
-   * Pulls events created or updated in Titan Calendar into Legal Case Management
+   * Pulls events created, updated, or deleted across ALL Titan calendar collections into Legal Case Management
    */
   async syncFromTitan(userId = 1) {
     try {
@@ -540,82 +645,141 @@ class TitanCalendarService {
         return { success: false, reason: 'unconfigured' };
       }
 
-      const calPath = await this.getPrimaryCalendarPath(settings);
-      const items = await this.getCalendarItems(settings, calPath);
+      const collections = await this.getCalendarCollections(settings);
+      console.log(`[Titan CalDAV] Starting sync across ${collections.length} calendar collections: ${collections.map(c => c.path).join(', ')}`);
 
+      let totalTitanEvents = 0;
       let createdCount = 0;
       let updatedCount = 0;
+      let deletedCount = 0;
 
-      for (const itemHref of items) {
+      for (const col of collections) {
         try {
-          const res = await this._httpRequest(settings, { path: itemHref, method: 'GET' });
-          if (res.status !== 200) continue;
+          const itemHrefs = await this.getCalendarItems(settings, col.path);
+          totalTitanEvents += itemHrefs.length;
+          const activeHrefsSet = new Set(itemHrefs);
 
-          const parsed = this.parseIcsEvent(res.body);
-          if (!parsed.summary || parsed.status === 'cancelled') continue;
+          const parsedEvents = await this.batchFetchEvents(settings, col.path, itemHrefs);
 
-          // Check if already in Legal Case Management by titan_event_id
-          const existing = await prisma.calendarEvent.findFirst({
-            where: { titan_event_id: itemHref },
-          });
-
-          if (existing) {
-            // Update if changed
-            await prisma.calendarEvent.update({
-              where: { id: existing.id },
-              data: {
-                title: parsed.summary,
-                description: parsed.description || existing.description,
-                event_date: parsed.dtstart || existing.event_date,
-                end_date: parsed.dtend || existing.end_date,
-                location: parsed.location || existing.location,
-              },
-            });
-            updatedCount++;
-          } else {
-            // Don't duplicate if it was created by LCM with UID lcm-evt-
-            if (parsed.uid && parsed.uid.startsWith('lcm-evt-')) {
-              const lcmIdMatch = parsed.uid.match(/^lcm-evt-(\d+)/);
-              if (lcmIdMatch) {
-                const lcmId = parseInt(lcmIdMatch[1], 10);
-                const localEvent = await prisma.calendarEvent.findUnique({ where: { id: lcmId } });
-                if (localEvent) {
-                  await prisma.calendarEvent.update({
-                    where: { id: lcmId },
-                    data: { titan_event_id: itemHref },
+          for (const parsed of parsedEvents) {
+            try {
+              if (!parsed.summary || parsed.status === 'cancelled') {
+                if (parsed.href) {
+                  const existingCancelled = await prisma.calendarEvent.findFirst({
+                    where: { titan_event_id: parsed.href }
                   });
-                  continue;
+                  if (existingCancelled) {
+                    await prisma.calendarEvent.delete({ where: { id: existingCancelled.id } });
+                    deletedCount++;
+                  }
+                }
+                continue;
+              }
+
+              // 1. Match by titan_event_id
+              let existing = await prisma.calendarEvent.findFirst({
+                where: { titan_event_id: parsed.href },
+              });
+
+              // 2. Match by LCM UID (lcm-evt-${id}@...)
+              if (!existing && parsed.uid && parsed.uid.startsWith('lcm-evt-')) {
+                const lcmMatch = parsed.uid.match(/^lcm-evt-(\d+)/);
+                if (lcmMatch) {
+                  const lcmId = parseInt(lcmMatch[1], 10);
+                  existing = await prisma.calendarEvent.findUnique({ where: { id: lcmId } });
                 }
               }
-            }
 
-            // Create new imported event from Titan into Legal Case Management
-            await prisma.calendarEvent.create({
-              data: {
-                title: parsed.summary,
-                description: parsed.description || null,
-                event_date: parsed.dtstart || new Date(),
-                end_date: parsed.dtend || null,
-                location: parsed.location || null,
-                type: 'general',
-                court_related: false,
-                created_by: userId || 1,
-                titan_event_id: itemHref,
-              },
-            });
-            createdCount++;
+              // 3. Match unlinked event with same title and same start time (within 60s)
+              if (!existing && parsed.dtstart) {
+                const windowStart = new Date(parsed.dtstart.getTime() - 60000);
+                const windowEnd = new Date(parsed.dtstart.getTime() + 60000);
+                existing = await prisma.calendarEvent.findFirst({
+                  where: {
+                    title: parsed.summary,
+                    titan_event_id: null,
+                    event_date: { gte: windowStart, lte: windowEnd },
+                  }
+                });
+              }
+
+              if (existing) {
+                // Check if any field changed
+                const titleChanged = existing.title !== parsed.summary;
+                const descChanged = parsed.description && existing.description !== parsed.description;
+                const dateChanged = parsed.dtstart && Math.abs(existing.event_date.getTime() - parsed.dtstart.getTime()) > 1000;
+                const endDateChanged = parsed.dtend && (!existing.end_date || Math.abs(existing.end_date.getTime() - parsed.dtend.getTime()) > 1000);
+                const locChanged = parsed.location && existing.location !== parsed.location;
+                const idMissing = existing.titan_event_id !== parsed.href;
+
+                if (titleChanged || descChanged || dateChanged || endDateChanged || locChanged || idMissing) {
+                  await prisma.calendarEvent.update({
+                    where: { id: existing.id },
+                    data: {
+                      title: parsed.summary,
+                      description: parsed.description || existing.description,
+                      event_date: parsed.dtstart || existing.event_date,
+                      end_date: parsed.dtend || existing.end_date,
+                      location: parsed.location || existing.location,
+                      titan_event_id: parsed.href,
+                    },
+                  });
+                  updatedCount++;
+                }
+              } else {
+                // Create new event imported from Titan into Legal Case Management
+                await prisma.calendarEvent.create({
+                  data: {
+                    title: parsed.summary,
+                    description: parsed.description || null,
+                    event_date: parsed.dtstart || new Date(),
+                    end_date: parsed.dtend || null,
+                    location: parsed.location || null,
+                    type: 'general',
+                    court_related: false,
+                    created_by: userId || 1,
+                    titan_event_id: parsed.href,
+                    timezone: PACIFIC_TIMEZONE,
+                  },
+                });
+                createdCount++;
+              }
+            } catch (eventErr) {
+              console.warn(`[Titan CalDAV] Error syncing event ${parsed.href}:`, eventErr.message);
+            }
           }
-        } catch (itemErr) {
-          console.warn(`[Titan CalDAV] Error processing item ${itemHref}:`, itemErr.message);
+
+          // Deletion detection for this collection:
+          // Remove any LCM event previously linked to this collection that no longer exists on Titan
+          const dbEventsForCol = await prisma.calendarEvent.findMany({
+            where: {
+              titan_event_id: { startsWith: col.path }
+            },
+            select: { id: true, titan_event_id: true, title: true }
+          });
+
+          for (const dbEvt of dbEventsForCol) {
+            if (!activeHrefsSet.has(dbEvt.titan_event_id)) {
+              console.log(`[Titan CalDAV] Event #${dbEvt.id} ("${dbEvt.title}") was deleted from Titan collection ${col.path}. Removing from LCM.`);
+              await prisma.calendarEvent.delete({
+                where: { id: dbEvt.id }
+              });
+              deletedCount++;
+            }
+          }
+        } catch (colErr) {
+          console.warn(`[Titan CalDAV] Error syncing collection ${col.path}:`, colErr.message);
         }
       }
 
       return {
         success: true,
-        total_titan_events: items.length,
+        collections_count: collections.length,
+        total_titan_events: totalTitanEvents,
         created: createdCount,
         updated: updatedCount,
-        message: `Synced with Titan Calendar: ${createdCount} imported, ${updatedCount} updated across ${items.length} total events.`,
+        deleted: deletedCount,
+        message: `Synced with Titan Calendar: ${createdCount} created, ${updatedCount} updated, ${deletedCount} deleted across ${totalTitanEvents} events in ${collections.length} collections.`,
       };
     } catch (err) {
       console.error('[Titan CalDAV Sync From Titan Error]:', err.message);

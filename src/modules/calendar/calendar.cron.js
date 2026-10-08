@@ -12,6 +12,23 @@ cron.schedule('*/5 * * * *', async () => {
   await exports.syncOutlookCalendar();
 });
 
+// Run every 5 minutes to pull Titan Calendar changes
+cron.schedule('*/5 * * * *', async () => {
+  await exports.syncTitanCalendar();
+});
+
+exports.syncTitanCalendar = async () => {
+  try {
+    const titanCalendarService = require('../settings/titan-calendar.service');
+    const settings = await titanCalendarService.getSettings();
+    if (settings.enabled && settings.email && settings.password) {
+      await titanCalendarService.syncFromTitan(1);
+    }
+  } catch (error) {
+    console.error('[Calendar Cron Error] Titan sync failed:', error.message);
+  }
+};
+
 exports.syncOutlookCalendar = async () => {
   try {
 //     console.log('[Calendar Cron] Running Outlook Calendar synchronization...');

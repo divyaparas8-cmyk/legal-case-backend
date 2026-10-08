@@ -8,19 +8,62 @@
 const PACIFIC_TIMEZONE = 'America/Los_Angeles';
 const PST_TIMEZONE = PACIFIC_TIMEZONE;
 
+// Reusable singleton Intl formatters
+const pacificAbbrFormatter = new Intl.DateTimeFormat('en-US', {
+  timeZone: PACIFIC_TIMEZONE,
+  timeZoneName: 'short'
+});
+
+const pacificConvergenceFormatter = new Intl.DateTimeFormat('en-US', {
+  timeZone: PACIFIC_TIMEZONE,
+  year: 'numeric',
+  month: 'numeric',
+  day: 'numeric',
+  hour: 'numeric',
+  minute: 'numeric',
+  second: 'numeric',
+  hourCycle: 'h23'
+});
+
+const pacificPartsFormatter = new Intl.DateTimeFormat('en-US', {
+  timeZone: PACIFIC_TIMEZONE,
+  year: 'numeric',
+  month: '2-digit',
+  day: '2-digit',
+  hour: '2-digit',
+  minute: '2-digit',
+  second: '2-digit',
+  hourCycle: 'h23',
+  timeZoneName: 'short'
+});
+
+const defaultPstDateFormatter = new Intl.DateTimeFormat('en-US', {
+  timeZone: PACIFIC_TIMEZONE,
+  month: 'short',
+  day: 'numeric',
+  year: 'numeric',
+});
+
+// Fast LRU/pruning in-memory caches
+const utcToPacificCache = new Map();
+const pstDateCache = new Map();
+const abbrCache = new Map();
+const MAX_CACHE_SIZE = 5000;
+
 /**
  * Get dynamic abbreviation for Pacific Time ('PDT' or 'PST')
  */
 function getPacificTimezoneAbbr(dateInput) {
   try {
-    const d = dateInput ? new Date(dateInput) : new Date();
-    if (isNaN(d.getTime())) return 'PT';
-    const formatter = new Intl.DateTimeFormat('en-US', {
-      timeZone: PACIFIC_TIMEZONE,
-      timeZoneName: 'short'
-    });
-    const parts = formatter.formatToParts(d);
-    return parts.find(p => p.type === 'timeZoneName')?.value || 'PT';
+    const d = dateInput instanceof Date ? dateInput : (dateInput ? new Date(dateInput) : new Date());
+    const time = d.getTime();
+    if (isNaN(time)) return 'PT';
+    if (abbrCache.has(time)) return abbrCache.get(time);
+    const parts = pacificAbbrFormatter.formatToParts(d);
+    const val = parts.find(p => p.type === 'timeZoneName')?.value || 'PT';
+    if (abbrCache.size >= MAX_CACHE_SIZE) abbrCache.clear();
+    abbrCache.set(time, val);
+    return val;
   } catch (err) {
     return 'PT';
   }
@@ -79,18 +122,7 @@ function pacificToUTC(dateStr, timeStr = null) {
 
     // First pass: evaluate initial UTC guess in America/Los_Angeles
     const utcGuess = new Date(Date.UTC(y, m - 1, d, hr, min, sec));
-    const formatter = new Intl.DateTimeFormat('en-US', {
-      timeZone: PACIFIC_TIMEZONE,
-      year: 'numeric',
-      month: 'numeric',
-      day: 'numeric',
-      hour: 'numeric',
-      minute: 'numeric',
-      second: 'numeric',
-      hourCycle: 'h23'
-    });
-
-    const parts = formatter.formatToParts(utcGuess);
+    const parts = pacificConvergenceFormatter.formatToParts(utcGuess);
     const p = {};
     for (const part of parts) p[part.type] = part.value;
     const inTzAsUtc = Date.UTC(p.year, p.month - 1, p.day, p.hour, p.minute, p.second);
@@ -98,7 +130,7 @@ function pacificToUTC(dateStr, timeStr = null) {
     const candidate = new Date(utcGuess.getTime() + offset);
 
     // Second pass: check if candidate in America/Los_Angeles matches requested local time
-    const cParts = formatter.formatToParts(candidate);
+    const cParts = pacificConvergenceFormatter.formatToParts(candidate);
     const cp = {};
     for (const part of cParts) cp[part.type] = part.value;
     const cInTzAsUtc = Date.UTC(cp.year, cp.month - 1, cp.day, cp.hour, cp.minute, cp.second);
@@ -129,22 +161,15 @@ function pacificToUTC(dateStr, timeStr = null) {
 function utcToPacific(dateInput) {
   if (!dateInput) return null;
   try {
-    const d = new Date(dateInput);
-    if (isNaN(d.getTime())) return null;
+    const d = dateInput instanceof Date ? dateInput : new Date(dateInput);
+    const time = d.getTime();
+    if (isNaN(time)) return null;
 
-    const formatter = new Intl.DateTimeFormat('en-US', {
-      timeZone: PACIFIC_TIMEZONE,
-      year: 'numeric',
-      month: '2-digit',
-      day: '2-digit',
-      hour: '2-digit',
-      minute: '2-digit',
-      second: '2-digit',
-      hourCycle: 'h23',
-      timeZoneName: 'short'
-    });
+    if (utcToPacificCache.has(time)) {
+      return utcToPacificCache.get(time);
+    }
 
-    const parts = formatter.formatToParts(d);
+    const parts = pacificPartsFormatter.formatToParts(d);
     const p = {};
     for (const part of parts) p[part.type] = part.value;
 
@@ -164,7 +189,7 @@ function utcToPacific(dateInput) {
 
     // Calculate exact offset in minutes and offset string for this specific timestamp
     const inTzUtc = Date.UTC(year, monthIdx, day, hour, minute, second);
-    const offsetMinutes = Math.round((inTzUtc - d.getTime()) / 60000);
+    const offsetMinutes = Math.round((inTzUtc - time) / 60000);
     const offsetSign = offsetMinutes >= 0 ? '+' : '-';
     const absOffset = Math.abs(offsetMinutes);
     const offsetHours = Math.floor(absOffset / 60);
@@ -172,7 +197,7 @@ function utcToPacific(dateInput) {
     const offsetString = `${offsetSign}${pad(offsetHours)}:${pad(offsetMins)}`;
     const isDST = p.timeZoneName === 'PDT';
 
-    return {
+    const result = {
       year,
       month,
       monthIdx,
@@ -190,6 +215,12 @@ function utcToPacific(dateInput) {
       offsetString,
       isDST
     };
+
+    if (utcToPacificCache.size >= MAX_CACHE_SIZE) {
+      utcToPacificCache.clear();
+    }
+    utcToPacificCache.set(time, result);
+    return result;
   } catch (err) {
     return null;
   }
@@ -225,8 +256,19 @@ function isSamePacificDay(d1, d2) {
 function formatPSTDate(dateInput, options = {}) {
   if (!dateInput) return '';
   try {
-    const d = new Date(dateInput);
-    if (isNaN(d.getTime())) return '';
+    const d = dateInput instanceof Date ? dateInput : new Date(dateInput);
+    const time = d.getTime();
+    if (isNaN(time)) return '';
+
+    const isDefault = Object.keys(options).length === 0;
+    if (isDefault) {
+      if (pstDateCache.has(time)) return pstDateCache.get(time);
+      const res = defaultPstDateFormatter.format(d);
+      if (pstDateCache.size >= MAX_CACHE_SIZE) pstDateCache.clear();
+      pstDateCache.set(time, res);
+      return res;
+    }
+
     return d.toLocaleDateString('en-US', {
       timeZone: PACIFIC_TIMEZONE,
       month: 'short',
