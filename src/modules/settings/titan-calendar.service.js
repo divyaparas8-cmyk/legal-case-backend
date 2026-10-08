@@ -564,8 +564,9 @@ class TitanCalendarService {
       });
     }
 
-    // If organizer is present but not in attendees, prepend organizer
-    if (organizer && !attendees.some(a => a.email.toLowerCase() === organizer.email.toLowerCase())) {
+    // In Titan Calendar, if an event has NO guests invited, attendees is empty. The organizer is purely the creator ("Event created by info").
+    // We only prepend organizer into attendees if there are actual invited attendees present in the event!
+    if (attendees.length > 0 && organizer && !attendees.some(a => a.email.toLowerCase() === organizer.email.toLowerCase())) {
       attendees.unshift({
         email: organizer.email,
         name: organizer.name,
@@ -816,6 +817,13 @@ class TitanCalendarService {
                       });
                     } catch (attErr) {
                       // Ignore duplicate or constraint warnings
+                    }
+                  } else {
+                    // When Titan event has 0 attendees, ensure DB has 0 attendees for this event
+                    try {
+                      await prisma.eventAttendee.deleteMany({ where: { event_id: existing.id } });
+                    } catch (attErr) {
+                      // Ignore
                     }
                   }
                 } else {
