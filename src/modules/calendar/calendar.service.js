@@ -8,13 +8,22 @@ const {
   PACIFIC_TIMEZONE
 } = require('../../utils/dateUtils');
 
-exports.getAllEvents = async () => {
+exports.getAllEvents = async (query = {}, currentUser = null) => {
   const events = [];
 
   // 1. Invoice due
   const invoices = await prisma.invoice.findMany({
     where: { due_date: { not: null } },
-    select: { id: true, invoice_number: true, amount: true, due_date: true, status: true, description: true, matter: { select: { status: true } } }
+    select: {
+      id: true,
+      invoice_number: true,
+      amount: true,
+      due_date: true,
+      status: true,
+      description: true,
+      matter_id: true,
+      matter: { select: { status: true, assigned_lawyer_id: true } }
+    }
   });
 
   invoices.forEach(i => {
@@ -27,6 +36,8 @@ exports.getAllEvents = async () => {
       amount: i.amount,
       status: i.status,
       description: i.description,
+      matter_id: i.matter_id,
+      assigned_lawyer_id: i.matter?.assigned_lawyer_id || null,
       raw_id: i.id,
       timezone: PACIFIC_TIMEZONE
     });
@@ -35,7 +46,19 @@ exports.getAllEvents = async () => {
   // 2. Matters
   const matters = await prisma.matter.findMany({
     where: { status: { not: 'completed' } },
-    select: { id: true, title: true, created_at: true, closed_at: true, updated_at: true, status: true, matter_number: true, description: true }
+    select: {
+      id: true,
+      title: true,
+      created_at: true,
+      closed_at: true,
+      updated_at: true,
+      status: true,
+      matter_number: true,
+      description: true,
+      assigned_lawyer_id: true,
+      created_by_user_id: true,
+      assigned_lawyer: { select: { id: true, full_name: true, email: true } }
+    }
   });
 
   matters.forEach(m => {
@@ -47,6 +70,9 @@ exports.getAllEvents = async () => {
       matter_id: m.id,
       matter_number: m.matter_number,
       description: m.description,
+      assigned_lawyer_id: m.assigned_lawyer_id || null,
+      created_by: m.created_by_user_id || null,
+      lawyer_name: m.assigned_lawyer?.full_name || null,
       raw_id: m.id,
       timezone: PACIFIC_TIMEZONE
     });
@@ -55,8 +81,16 @@ exports.getAllEvents = async () => {
   // 3. Manual events
   const custom = await prisma.calendarEvent.findMany({
     include: {
-      matter: { select: { matter_number: true, title: true, status: true } },
-      attendees: { include: { user: { select: { full_name: true, email: true } } } }
+      matter: {
+        select: {
+          matter_number: true,
+          title: true,
+          status: true,
+          assigned_lawyer_id: true,
+          assigned_lawyer: { select: { id: true, full_name: true, email: true } }
+        }
+      },
+      attendees: { include: { user: { select: { id: true, full_name: true, email: true } } } }
     }
   });
 
@@ -77,8 +111,12 @@ exports.getAllEvents = async () => {
       court_room: e.court_room,
       judge_name: e.judge_name,
       is_court_event: e.is_court_event || e.court_related || false,
+      created_by: e.created_by,
+      assigned_lawyer_id: e.matter?.assigned_lawyer_id || null,
+      lawyer_name: e.matter?.assigned_lawyer?.full_name || null,
       attendees: (e.attendees || []).map(a => ({
         id: a.id,
+        user_id: a.user_id,
         email: a.email || a.user?.email || '',
         name: a.user?.full_name || (a.email ? a.email.split('@')[0] : 'Guest'),
         status: a.status || 'pending',
@@ -100,6 +138,43 @@ exports.getAllEvents = async () => {
       titan_event_id: e.titan_event_id
     });
   });
+
+  const isEventForUser = (event, userId, userEmail = null) => {
+    if (!userId && !userEmail) return false;
+    const uid = userId ? Number(userId) : null;
+    const emailLower = userEmail ? String(userEmail).toLowerCase().trim() : null;
+
+    if (uid && event.created_by && Number(event.created_by) === uid) return true;
+    if (uid && event.assigned_lawyer_id && Number(event.assigned_lawyer_id) === uid) return true;
+    if (Array.isArray(event.attendees)) {
+      const match = event.attendees.some(a => {
+        if (uid && a.user_id && Number(a.user_id) === uid) return true;
+        if (emailLower && a.email && a.email.toLowerCase().trim() === emailLower) return true;
+        return false;
+      });
+      if (match) return true;
+    }
+    return false;
+  };
+
+  events.forEach(e => {
+    if (currentUser?.id) {
+      e.is_mine = isEventForUser(e, currentUser.id, currentUser.email);
+    }
+  });
+
+  if (query.scope === 'mine' && currentUser?.id) {
+    return events.filter(e => isEventForUser(e, currentUser.id, currentUser.email));
+  }
+
+  if (query.lawyer_id) {
+    const userRole = currentUser?.role || (Array.isArray(currentUser?.roles) ? currentUser.roles[0] : null);
+    if (userRole === 'lawyer' && currentUser?.id && Number(query.lawyer_id) !== Number(currentUser.id)) {
+      // Security guard: Lawyer requested another lawyer's events directly -> restrict to own events
+      return events.filter(e => isEventForUser(e, currentUser.id, currentUser.email));
+    }
+    return events.filter(e => isEventForUser(e, query.lawyer_id));
+  }
 
   return events;
 };

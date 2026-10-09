@@ -20,7 +20,7 @@ exports.getEvents = async (req, res, next) => {
       }
     }
 
-    const data = await calendarService.getAllEvents();
+    const data = await calendarService.getAllEvents(req.query, req.user);
     res.status(200).json({ data });
   } catch (error) {
     next(error);

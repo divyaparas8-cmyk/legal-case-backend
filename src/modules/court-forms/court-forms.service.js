@@ -464,13 +464,13 @@ exports.prefillForMatter = async (matterId) => {
     }
   });
 
-  const clientAddr = [
-    matter.client?.address_line_1,
-    matter.client?.address_line_2,
-    matter.client?.city,
-    matter.client?.state,
-    matter.client?.postal_code,
-  ].filter(Boolean).join(', ');
+  const clientStreet = matter.client?.address_line_1 || matter.client?.home_address || matter.client?.business_address || '';
+  const clientStreet2 = matter.client?.address_line_2 || '';
+  const clientCity = matter.client?.city || '';
+  const clientState = matter.client?.state || '';
+  const clientZip = matter.client?.postal_code || '';
+  const clientCityStateZip = [clientCity, clientState ? (clientZip ? `${clientState} ${clientZip}` : clientState) : clientZip].filter(Boolean).join(', ');
+  const clientAddr = [clientStreet, clientStreet2, clientCity, clientState, clientZip].filter(Boolean).join(', ') || clientStreet;
 
   const firmAddr = [
     companyProfile?.address_line_1 || companyProfile?.address,
@@ -487,20 +487,39 @@ exports.prefillForMatter = async (matterId) => {
   const firmZip = companyProfile?.postal_code || '90069';
   const firmPhone = companyProfile?.phone || '(310) 504-2359';
   const firmEmail = companyProfile?.email || lawyerEmail;
-  const courtName = matter.court_name || 'Superior Court of California';
-  const courtAddress = matter.court_address || (matter.court_name ? `${matter.court_name}, California` : '111 N. Hill St., Los Angeles, CA 90012');
   const barNo = companyProfile?.bar_number || '365147';
   const opposingParty = matter.opposing_party_name || matter.opposing_party || '';
   const caseNumber = matter.case_number || matter.matter_number || '';
 
+  // Court information assembly
+  const courtCounty = matter.court_county || (matter.court_name && matter.court_name.toLowerCase().includes('county') ? matter.court_name.replace(/.*county of\s*/i, '').trim() : 'Los Angeles');
+  const courtName = matter.court_name || `Superior Court of California, County of ${courtCounty}`;
+  const courtAddress = matter.court_address || (matter.court_name ? `${matter.court_name}, California` : '111 N. Hill St., Los Angeles, CA 90012');
+  const courtDept = matter.court_department || '';
+  const judgeName = matter.judge_name || '';
+  const hearingDateStr = nextHearing
+    ? nextHearing.event_date.toISOString().split('T')[0]
+    : (matter.next_hearing ? new Date(matter.next_hearing).toISOString().split('T')[0] : '');
+  const hearingTimeStr = matter.hearing_time || (nextHearing?.date ? new Date(nextHearing.date).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }) : '');
+
+  const clientName = matter.client?.full_name || '';
+  const clientFirstName = matter.client?.contact_first_name || (clientName ? clientName.split(' ')[0] : '');
+  const clientLastName = matter.client?.contact_last_name || (clientName ? clientName.split(' ').slice(1).join(' ') : '');
+
   return {
+    // ── ATTORNEY & FRONT FIRM INFORMATION ──
     attorney_name: lawyerName,
     AttorneyName: lawyerName,
     lawyer_name: lawyerName,
+    attorney_for: clientName || 'Plaintiff',
+    AttorneyFor: clientName || 'Plaintiff',
     'Atty Bar No': barNo,
     bar_number: barNo,
+    bar_no: barNo,
     attorney_email: lawyerEmail,
     AttorneyEmail: lawyerEmail,
+    attorney_phone: firmPhone,
+    attorney_fax: companyProfile?.fax || '',
     firm_name: firmName,
     FirmName: firmName,
     firm_address: firmAddr,
@@ -515,37 +534,61 @@ exports.prefillForMatter = async (matterId) => {
     FirmPhone: firmPhone,
     firm_email: firmEmail,
     FirmEmail: firmEmail,
-    client_name: matter.client?.full_name || '',
-    ClientName: matter.client?.full_name || '',
+
+    // ── CLIENT INFORMATION ──
+    client_name: clientName,
+    ClientName: clientName,
+    client_first_name: clientFirstName,
+    client_last_name: clientLastName,
     client_address: clientAddr,
     ClientAddress: clientAddr,
-    client_city: matter.client?.city || '',
-    client_state: matter.client?.state || '',
-    client_zip: matter.client?.postal_code || '',
+    client_street: clientStreet,
+    client_city: clientCity,
+    client_state: clientState,
+    client_zip: clientZip,
+    client_city_state_zip: clientCityStateZip,
     client_phone: matter.client?.phone || '',
+    ClientPhone: matter.client?.phone || '',
     client_email: matter.client?.email || '',
+    ClientEmail: matter.client?.email || '',
+    client_organization: matter.client?.organization_name || '',
+    party_role: matter.client?.party_role || 'Plaintiff',
+
+    // ── CASE IDENTIFICATION & PARTIES ──
     case_title: matter.title || '',
     CaseTitle: matter.title || '',
     case_number: caseNumber,
     CaseNumber: caseNumber,
     matter_number: matter.matter_number || '',
     MatterNumber: matter.matter_number || '',
-    plaintiff: matter.client?.full_name || '',
-    Plaintiff: matter.client?.full_name || '',
+    plaintiff: clientName,
+    Plaintiff: clientName,
+    petitioner: clientName,
     defendant: opposingParty,
     Defendant: opposingParty,
+    respondent: opposingParty,
+    opposing_party: opposingParty,
+    opposing_counsel: matter.client?.opposing_counsel_name || '',
     filing_date: matter.initial_filing_date
       ? matter.initial_filing_date.toISOString().split('T')[0]
       : '',
+
+    // ── COURT & HEARING INFORMATION ──
     court_name: courtName,
     CourtName: courtName,
+    court_county: courtCounty,
+    CourtCounty: courtCounty,
+    court_branch: matter.court_name || courtCounty,
     court_address: courtAddress,
     CourtAddress: courtAddress,
-    judge_name: matter.judge_name || '',
-    JudgeName: matter.judge_name || '',
-    hearing_date: nextHearing
-      ? nextHearing.event_date.toISOString().split('T')[0]
-      : (matter.next_hearing ? new Date(matter.next_hearing).toISOString().split('T')[0] : ''),
+    court_department: courtDept,
+    court_dept: courtDept,
+    dept: courtDept,
+    department: courtDept,
+    judge_name: judgeName,
+    JudgeName: judgeName,
+    hearing_date: hearingDateStr,
+    hearing_time: hearingTimeStr,
     hearing_location: nextHearing?.location || courtName,
     ...customFieldsData
   };

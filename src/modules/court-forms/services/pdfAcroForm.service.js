@@ -136,48 +136,96 @@ async function fillFields(buffer, fieldValuesMap = {}, formData = {}) {
           } 
           // Attorney For / Client Name
           else if (lowerName.includes('attyfor') || lowerName.includes('attorneyfor') || (!hasAttyForField && lowerName.includes('attypartyinfo') && lowerName.includes('name'))) {
-            valueToFill = dataPool.client_name || dataPool.plaintiff;
+            valueToFill = dataPool.attorney_for || dataPool.client_name || dataPool.plaintiff;
           } 
+          // Client Specific Fields
+          else if (lowerName.includes('clientname') || lowerName.includes('client_name') || lowerName.includes('applicant')) {
+            valueToFill = dataPool.client_name || dataPool.plaintiff;
+          }
+          else if (lowerName.includes('clientstreet') || lowerName.includes('client_street')) {
+            valueToFill = dataPool.client_street || dataPool.client_address;
+          }
+          else if (lowerName.includes('clientcity') || lowerName.includes('client_city')) {
+            valueToFill = dataPool.client_city;
+          }
+          else if (lowerName.includes('clientstate') || lowerName.includes('client_state')) {
+            valueToFill = dataPool.client_state;
+          }
+          else if (lowerName.includes('clientzip') || lowerName.includes('client_zip')) {
+            valueToFill = dataPool.client_zip;
+          }
+          else if (lowerName.includes('clientphone') || lowerName.includes('client_phone') || lowerName.includes('clienttel')) {
+            valueToFill = dataPool.client_phone;
+          }
+          else if (lowerName.includes('clientemail') || lowerName.includes('client_email')) {
+            valueToFill = dataPool.client_email;
+          }
+          else if (lowerName.includes('clientaddress') || lowerName.includes('client_address')) {
+            valueToFill = dataPool.client_address;
+          }
           // Firm Name
           else if (lowerName.includes('attyfirm') || lowerName.includes('firm') || lowerName.includes('lawfirm')) {
             valueToFill = dataPool.firm_name;
           } 
           // Firm / Attorney Zip Code
-          else if (lowerName.includes('zip')) {
+          else if (lowerName.includes('firm_zip') || (lowerName.includes('zip') && !lowerName.includes('client') && !lowerName.includes('crt'))) {
             valueToFill = dataPool.firm_zip;
           }
           // Firm / Attorney City
-          else if (lowerName.includes('city')) {
-            valueToFill = dataPool.firm_city || dataPool.court_city;
+          else if (lowerName.includes('firm_city') || (lowerName.includes('city') && !lowerName.includes('client') && !lowerName.includes('crt'))) {
+            valueToFill = dataPool.firm_city;
           }
           // Firm / Attorney State
-          else if (lowerName.includes('state')) {
-            valueToFill = dataPool.firm_state || dataPool.court_state;
+          else if (lowerName.includes('firm_state') || (lowerName.includes('state') && !lowerName.includes('client') && !lowerName.includes('crt'))) {
+            valueToFill = dataPool.firm_state;
           }
           // Firm / Attorney Address - Street
-          else if (lowerName.includes('street') || lowerName.includes('address') || lowerName.includes('addr')) {
-            valueToFill = dataPool.firm_address || dataPool.court_address;
+          else if (lowerName.includes('firm_address') || lowerName.includes('firmaddress') || (lowerName.includes('street') && !lowerName.includes('crt') && !lowerName.includes('client'))) {
+            valueToFill = dataPool.firm_address;
           } 
           // Phone / Telephone Number
           else if (lowerName.includes('telephone') || lowerName.includes('phone') || lowerName.includes('tel')) {
-            valueToFill = dataPool.firm_phone || dataPool.client_phone;
+            valueToFill = lowerName.includes('client') ? (dataPool.client_phone || dataPool.firm_phone) : (dataPool.firm_phone || dataPool.client_phone);
           } 
           // Fax
           else if (lowerName.includes('fax')) {
-            valueToFill = dataPool.firm_fax || dataPool.client_fax || '';
+            valueToFill = dataPool.attorney_fax || dataPool.firm_fax || '';
           }
           // Email Address
           else if (lowerName.includes('email') || lowerName.includes('e-mail')) {
-            valueToFill = dataPool.attorney_email || dataPool.client_email;
+            valueToFill = lowerName.includes('client') ? (dataPool.client_email || dataPool.attorney_email) : (dataPool.attorney_email || dataPool.client_email);
           } 
-          // Court County / Superior Court Name
-          else if (lowerName.includes('crtcounty') || lowerName.includes('county') || lowerName.includes('superiorcourt') || lowerName.includes('courtname') || lowerName.includes('court_name') || lowerName.includes('crtbranch') || lowerName.includes('branch')) {
-            valueToFill = dataPool.court_name;
+          // Court County
+          else if (lowerName.includes('crtcounty') || lowerName.includes('county')) {
+            valueToFill = dataPool.court_county || dataPool.court_name;
+          }
+          // Court Department / Room
+          else if (lowerName.includes('dept') || lowerName.includes('department') || lowerName.includes('courtroom')) {
+            valueToFill = dataPool.court_department || dataPool.dept || '';
+          }
+          // Court Branch / Name
+          else if (lowerName.includes('crtbranch') || lowerName.includes('branch') || lowerName.includes('superiorcourt') || lowerName.includes('courtname') || lowerName.includes('court_name')) {
+            valueToFill = dataPool.court_branch || dataPool.court_name;
           } 
           // Court Street Address / Mailing Address
-          else if (lowerName.includes('crtstreet') || lowerName.includes('crtmailingadd') || lowerName.includes('crtcityzip') || lowerName.includes('court_address') || lowerName.includes('courtaddress')) {
+          else if (lowerName.includes('crtstreet') || lowerName.includes('crtmailingadd') || lowerName.includes('court_address') || lowerName.includes('courtaddress')) {
             valueToFill = dataPool.court_address;
-          } 
+          }
+          // Court City Zip
+          else if (lowerName.includes('crtcityzip')) {
+            valueToFill = dataPool.court_city_zip || dataPool.court_address;
+          }
+          // Hearing Date & Time
+          else if (lowerName.includes('hearingtime') || lowerName.includes('hrgtime') || (lowerName.includes('time') && lowerName.includes('hearing'))) {
+            valueToFill = dataPool.hearing_time;
+          }
+          else if (lowerName.includes('hearingdate') || lowerName.includes('hrgdate') || (lowerName.includes('date') && lowerName.includes('hearing'))) {
+            valueToFill = dataPool.hearing_date;
+          }
+          // Judge Name
+          else if (lowerName.includes('judge') || lowerName.includes('judgename')) {
+            valueToFill = dataPool.judge_name;
+          }
           // Plaintiff / Petitioner / Party 1
           else if (lowerName.includes('party1') || lowerName.includes('plaintiff') || lowerName.includes('petitioner')) {
             valueToFill = dataPool.plaintiff || dataPool.client_name;
@@ -185,10 +233,6 @@ async function fillFields(buffer, fieldValuesMap = {}, formData = {}) {
           // Defendant / Respondent / Party 2
           else if (lowerName.includes('party2') || lowerName.includes('defendant') || lowerName.includes('respondent')) {
             valueToFill = dataPool.defendant;
-          } 
-          // Applicant / Client Name
-          else if (lowerName.includes('applicant') || lowerName.includes('client')) {
-            valueToFill = dataPool.client_name || dataPool.plaintiff;
           }
         }
 
