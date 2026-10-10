@@ -431,6 +431,15 @@ const create = async (data, user) => {
     throw err;
   }
 
+  // Enforce positive invoice amount greater than 0
+  const amt = parseFloat(data.amount);
+  if (isNaN(amt) || amt <= 0) {
+    const err = new Error('Invoice amount must be a positive number greater than 0');
+    err.statusCode = 400;
+    throw err;
+  }
+  data.amount = Math.abs(amt);
+
   // Auto-calculate due date (Current Date + 5 days) if not provided
   if (!data.due_date) {
     const dueDate = new Date();
@@ -438,7 +447,25 @@ const create = async (data, user) => {
     data.due_date = dueDate;
   }
 
-  const invoice = await prisma.invoice.create({ data });
+  let itemsToCreate = undefined;
+  if (Array.isArray(data.items) && data.items.length > 0) {
+    itemsToCreate = {
+      create: data.items
+        .filter(it => it && (it.description || it.amount))
+        .map(it => ({
+          description: String(it.description || 'Legal Services Rendered').trim(),
+          amount: parseFloat(it.amount) || 0
+        }))
+    };
+    delete data.items;
+  }
+
+  const invoice = await prisma.invoice.create({
+    data: {
+      ...data,
+      ...(itemsToCreate ? { items: itemsToCreate } : {})
+    }
+  });
   
   // Log activity
   await prisma.activity.create({
@@ -482,6 +509,17 @@ const update = async (id, data, user) => {
     err.statusCode = 403;
     throw err;
   }
+
+  if (data.amount !== undefined) {
+    const amt = parseFloat(data.amount);
+    if (isNaN(amt) || amt <= 0) {
+      const err = new Error('Invoice amount must be a positive number greater than 0');
+      err.statusCode = 400;
+      throw err;
+    }
+    data.amount = Math.abs(amt);
+  }
+
   const invoice = await prisma.invoice.update({
     where: { id: parseInt(id) },
     data,

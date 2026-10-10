@@ -142,7 +142,26 @@ const getAll = async (query, user) => {
     skip,
     take,
     include: {
-      client: { select: { id: true, full_name: true } },
+      client: {
+        select: {
+          id: true,
+          full_name: true,
+          email: true,
+          phone: true,
+          organization_name: true,
+          party_type: true,
+          party_role: true,
+          address_line_1: true,
+          address_line_2: true,
+          city: true,
+          state: true,
+          postal_code: true,
+          home_address: true,
+          business_address: true,
+          is_portal_enabled: true,
+          status: true,
+        }
+      },
       parties: { select: { id: true, full_name: true } },
       assigned_lawyer: { select: { id: true, full_name: true } },
     },

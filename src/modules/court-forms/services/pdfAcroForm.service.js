@@ -1,4 +1,4 @@
-const { PDFDocument, StandardFonts, PDFName } = require('pdf-lib');
+const { PDFDocument, StandardFonts, PDFName, PDFString } = require('pdf-lib');
 
 /**
  * Extracts form field names from an AcroForm PDF buffer.
@@ -181,7 +181,10 @@ async function fillFields(buffer, fieldValuesMap = {}, formData = {}) {
           }
           // Firm / Attorney Address - Street
           else if (lowerName.includes('firm_address') || lowerName.includes('firmaddress') || (lowerName.includes('street') && !lowerName.includes('crt') && !lowerName.includes('client'))) {
-            valueToFill = dataPool.firm_address;
+            valueToFill = dataPool.firm_street || dataPool.firm_address;
+            if (valueToFill && typeof valueToFill === 'string' && valueToFill.includes('\n')) {
+              valueToFill = valueToFill.split('\n')[0].trim();
+            }
           } 
           // Phone / Telephone Number
           else if (lowerName.includes('telephone') || lowerName.includes('phone') || lowerName.includes('tel')) {
@@ -199,21 +202,35 @@ async function fillFields(buffer, fieldValuesMap = {}, formData = {}) {
           else if (lowerName.includes('crtcounty') || lowerName.includes('county')) {
             valueToFill = dataPool.court_county || dataPool.court_name;
           }
-          // Court Department / Room
-          else if (lowerName.includes('dept') || lowerName.includes('department') || lowerName.includes('courtroom')) {
-            valueToFill = dataPool.court_department || dataPool.dept || '';
+          // Court Department / Room (never judge name!)
+          else if (lowerName.includes('dept') || lowerName.includes('department') || lowerName.includes('courtroom') || lowerName.includes('hearingdept')) {
+            valueToFill = dataPool.court_department || dataPool.dept || dataPool.court_dept || '';
           }
           // Court Branch / Name
           else if (lowerName.includes('crtbranch') || lowerName.includes('branch') || lowerName.includes('superiorcourt') || lowerName.includes('courtname') || lowerName.includes('court_name')) {
             valueToFill = dataPool.court_branch || dataPool.court_name;
           } 
-          // Court Street Address / Mailing Address
-          else if (lowerName.includes('crtstreet') || lowerName.includes('crtmailingadd') || lowerName.includes('court_address') || lowerName.includes('courtaddress')) {
-            valueToFill = dataPool.court_address;
+          // Court Street Address
+          else if (lowerName.includes('crtstreet') || lowerName.includes('court_street')) {
+            valueToFill = dataPool.court_street || dataPool.court_address;
+            if (valueToFill && typeof valueToFill === 'string' && valueToFill.includes('\n')) {
+              valueToFill = valueToFill.split('\n')[0].trim();
+            }
+          }
+          // Court Mailing Address
+          else if (lowerName.includes('crtmailingadd') || lowerName.includes('court_mailing')) {
+            valueToFill = dataPool.court_mailing_address || dataPool.court_street || dataPool.court_address;
+            if (valueToFill && typeof valueToFill === 'string' && valueToFill.includes('\n')) {
+              valueToFill = valueToFill.split('\n')[0].trim();
+            }
           }
           // Court City Zip
-          else if (lowerName.includes('crtcityzip')) {
-            valueToFill = dataPool.court_city_zip || dataPool.court_address;
+          else if (lowerName.includes('crtcityzip') || lowerName.includes('court_city_zip')) {
+            valueToFill = dataPool.court_city_zip || '';
+          }
+          // Fallback Court Address
+          else if (lowerName.includes('court_address') || lowerName.includes('courtaddress')) {
+            valueToFill = dataPool.court_street || dataPool.court_address;
           }
           // Hearing Date & Time
           else if (lowerName.includes('hearingtime') || lowerName.includes('hrgtime') || (lowerName.includes('time') && lowerName.includes('hearing'))) {
@@ -242,28 +259,49 @@ async function fillFields(buffer, fieldValuesMap = {}, formData = {}) {
           let actionDict = null;
 
           if (lowerName.includes('print')) {
-            actionDict = pdfDoc.context.obj({
-              S: 'JavaScript',
-              JS: 'print();'
+            const jsPrint = pdfDoc.context.obj({
+              S: PDFName.of('JavaScript'),
+              JS: PDFString.of('this.print(true);')
             });
-//             console.log(`[PDF_ACROFORM_RUNTIME] Configured Print Action for Button "${fName}"`);
+            actionDict = pdfDoc.context.obj({
+              S: PDFName.of('Named'),
+              N: PDFName.of('Print'),
+              Next: jsPrint
+            });
           } else if (lowerName.includes('save')) {
-            actionDict = pdfDoc.context.obj({
-              S: 'JavaScript',
-              JS: 'app.execMenuItem("SaveAs");'
+            const jsSave = pdfDoc.context.obj({
+              S: PDFName.of('JavaScript'),
+              JS: PDFString.of('try { app.execMenuItem("SaveAs"); } catch(e) { this.saveAs(); }')
             });
-//             console.log(`[PDF_ACROFORM_RUNTIME] Configured Save Action for Button "${fName}"`);
+            actionDict = pdfDoc.context.obj({
+              S: PDFName.of('Named'),
+              N: PDFName.of('SaveAs'),
+              Next: jsSave
+            });
           } else if (lowerName.includes('reset') || lowerName.includes('clear')) {
-            actionDict = pdfDoc.context.obj({
-              S: 'ResetForm'
+            const jsReset = pdfDoc.context.obj({
+              S: PDFName.of('JavaScript'),
+              JS: PDFString.of('this.resetForm();')
             });
-//             console.log(`[PDF_ACROFORM_RUNTIME] Configured Reset/Clear Action for Button "${fName}"`);
+            actionDict = pdfDoc.context.obj({
+              S: PDFName.of('ResetForm'),
+              Next: jsReset
+            });
           }
 
           if (actionDict) {
+            const aaDict = pdfDoc.context.obj({
+              U: actionDict,
+              D: actionDict
+            });
             widgets.forEach(widget => {
               widget.dict.set(PDFName.of('A'), actionDict);
+              widget.dict.set(PDFName.of('AA'), aaDict);
             });
+            try {
+              field.acroField.dict.set(PDFName.of('A'), actionDict);
+              field.acroField.dict.set(PDFName.of('AA'), aaDict);
+            } catch (_) {}
           }
         }
 
@@ -271,19 +309,49 @@ async function fillFields(buffer, fieldValuesMap = {}, formData = {}) {
           if (type === 'PDFTextField') {
             const sanitizedValue = sanitizeWinAnsiString(valueToFill);
             
-            // Standardize calibrated legal typography (avoids oversized 20-30pt text from font size 0)
-            const isMultiline = sanitizedValue.includes('\n') || sanitizedValue.includes('\\n') || sanitizedValue.length > 55;
-            if (isMultiline) {
-              field.enableMultiline();
-              field.setFontSize(8.5);
-            } else if (sanitizedValue.length <= 10) {
-              field.setFontSize(9);
+            // Inspect physical bounding box dimensions of the AcroForm widget
+            const widgets = field.acroField.getWidgets();
+            let widgetHeight = 12;
+            let widgetWidth = 100;
+            if (widgets && widgets.length > 0) {
+              try {
+                const rect = widgets[0].getRectangle();
+                if (rect && rect.height > 0) {
+                  widgetHeight = rect.height;
+                  widgetWidth = rect.width;
+                }
+              } catch (_) {}
+            }
+            
+            const isTallBox = widgetHeight >= 16;
+            let finalValue = sanitizedValue;
+
+            if (!isTallBox) {
+              // Single-line field: Sanitize newlines to avoid bleeding down into adjacent rows
+              finalValue = finalValue.replace(/[\r\n]+/g, ', ').trim();
+              
+              // Calibrate typography to fit inside bounding box without border collisions
+              if (widgetHeight <= 7.5) {
+                // Micro fields (e.g. 6pt height HearingDept, HearingDate, sub-boxes)
+                field.setFontSize(5.5);
+              } else if (widgetHeight <= 10.5) {
+                // Standard California court caption single-line fields (9-10pt height)
+                const approxCharLimit = Math.floor(widgetWidth / 4.8);
+                if (finalValue.length > approxCharLimit && approxCharLimit > 5) {
+                  field.setFontSize(6.8);
+                } else {
+                  field.setFontSize(7.8);
+                }
+              } else {
+                field.setFontSize(8.5);
+              }
             } else {
-              field.setFontSize(9.5);
+              // Multi-line textarea (remarks, causes of action, attachments)
+              field.enableMultiline();
+              field.setFontSize(8.2);
             }
             
             const maxLength = field.getMaxLength();
-            let finalValue = sanitizedValue;
             if (maxLength !== undefined && finalValue.length > maxLength) {
               finalValue = finalValue.substring(0, maxLength);
               console.warn(`[PDF_ACROFORM] Truncated field "${fName}" from ${sanitizedValue.length} to ${maxLength} chars`);

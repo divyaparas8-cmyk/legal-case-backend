@@ -70,4 +70,7 @@ router.use('/templates', templatesRoutes);
 router.use('/import', importRoutes);
 router.use('/titan-email', titanEmailRoutes);
 
+const aiRoutes = require('../modules/ai/ai.routes');
+router.use('/ai', aiRoutes);
+
 module.exports = router;

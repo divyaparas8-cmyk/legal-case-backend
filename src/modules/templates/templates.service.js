@@ -244,6 +244,12 @@ const cloneToMatter = async (templateId, matterId, user, extraData = {}) => {
     content = content.replace(/{{PartyName}}/g, clientFull);
     content = content.replace(/{{RecipientName}}/g, clientFull);
     content = content.replace(/{{RecipientAddress}}/g, clientAddr);
+    content = content.replace(/{{RecipientEmail}}/gi, matter.client?.email || '');
+    content = content.replace(/{{recipient_email}}/gi, matter.client?.email || '');
+
+    const defaultDelivery = matter.client?.email ? `VIA EMAIL: ${matter.client.email}` : 'VIA U.S. FIRST CLASS MAIL';
+    content = content.replace(/{{DeliveryMethod}}/gi, defaultDelivery);
+    content = content.replace(/{{delivery_method}}/gi, defaultDelivery);
 
     // Date Tags
     content = content.replace(/{{date}}/gi, todayFormatted);

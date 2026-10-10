@@ -197,20 +197,78 @@ const signDraft = async (draftId, userId, signatureData, ipAddress, deviceInfo, 
   });
 };
 
+const extractLetterMetadata = (content) => {
+  if (!content) return { cleanContent: '', metadata: {} };
+  let metadata = {};
+  let cleanContent = String(content);
+
+  // Check for <!--LETTER_META:...-->
+  const metaMatch = cleanContent.match(/<!--\s*LETTER_META:\s*({[\s\S]*?})\s*-->/i);
+  if (metaMatch) {
+    try {
+      metadata = JSON.parse(metaMatch[1]);
+      cleanContent = cleanContent.replace(metaMatch[0], '').trim();
+    } catch (e) {
+      console.warn('Failed to parse LETTER_META JSON', e);
+    }
+  }
+
+  // Also detect transmission header if not in JSON
+  if (!metadata.delivery_method && !metadata.delivery_method_text) {
+    const deliveryMatch = cleanContent.match(/(?:^|\n)\s*(?:TRANSMISSION|DELIVERY METHOD|DELIVERY)?\s*:?\s*(VIA\s+(?:EMAIL|U\.?S\.?\s+MAIL|CERTIFIED\s+MAIL|OVERNIGHT|HAND\s+DELIVERY)[^\n\r]*)/i);
+    if (deliveryMatch) {
+      metadata.delivery_method_text = deliveryMatch[1].trim();
+    }
+  }
+
+  return { cleanContent, metadata };
+};
+
+const formatDeliveryMethod = (metadata = {}, clientEmail = '') => {
+  if (metadata.delivery_method_text) {
+    return metadata.delivery_method_text.toUpperCase();
+  }
+  const method = (metadata.delivery_method || '').toLowerCase().trim();
+  const targetEmail = metadata.delivery_email || clientEmail || '';
+
+  if (method === 'email' || method === 'via_email') {
+    return targetEmail ? `VIA EMAIL: ${targetEmail}` : 'VIA EMAIL CORRESPONDENCE';
+  }
+  if (method === 'us_mail' || method === 'usmail' || method === 'mail') {
+    return 'VIA U.S. FIRST CLASS MAIL';
+  }
+  if (method === 'certified_mail' || method === 'certified') {
+    return 'VIA CERTIFIED MAIL, RETURN RECEIPT REQUESTED';
+  }
+  if (method === 'courier' || method === 'overnight') {
+    return 'VIA OVERNIGHT COURIER';
+  }
+  if (method === 'hand_delivery') {
+    return 'VIA HAND DELIVERY';
+  }
+
+  if (targetEmail) {
+    return `VIA EMAIL: ${targetEmail}`;
+  }
+  return 'VIA U.S. FIRST CLASS MAIL';
+};
+
 const resolveTemplateVariables = (content, draft, matter, company) => {
   if (!content) return '';
-  let resolved = content;
+  const { cleanContent, metadata } = extractLetterMetadata(content);
+  let resolved = cleanContent;
 
   const primaryClient = matter?.client;
   const attorneyName = matter?.assigned_lawyer?.full_name || '';
-  const recipientName = primaryClient?.full_name || '';
-  const recipientAddress = [
+  const recipientName = metadata.recipient_name || primaryClient?.full_name || '';
+  const recipientAddress = metadata.recipient_address || [
     primaryClient?.address_line_1 || primaryClient?.home_address || primaryClient?.business_address,
     primaryClient?.address_line_2,
     [primaryClient?.city, primaryClient?.state, primaryClient?.postal_code].filter(Boolean).join(', ')
   ].filter(Boolean).join('\n') || '';
 
   const todayDate = formatPSTDate(new Date(), { month: 'long', day: 'numeric', year: 'numeric' });
+  const deliveryMethodText = formatDeliveryMethod(metadata, primaryClient?.email);
 
   const firmName = company.company_name || '';
   const firmAddress = company.address || '';
@@ -261,6 +319,11 @@ const resolveTemplateVariables = (content, draft, matter, company) => {
     'PartyName': recipientName,
     'RecipientName': recipientName,
     'RecipientAddress': recipientAddress,
+    'DeliveryMethod': deliveryMethodText,
+    'delivery_method': deliveryMethodText,
+    'DeliveryType': metadata.delivery_method === 'us_mail' ? 'U.S. Mail' : (metadata.delivery_method === 'certified_mail' ? 'Certified Mail' : 'Email'),
+    'RecipientEmail': metadata.delivery_email || primaryClient?.email || '',
+    'recipient_email': metadata.delivery_email || primaryClient?.email || '',
   };
 
   const mappings = {
@@ -526,8 +589,19 @@ const generatePdf = (draftId, user) => {
       } else if (isLetter) {
         console.log('[PDF Gen Log] Executing LETTER template branch');
         
+        const { cleanContent, metadata } = extractLetterMetadata(draft.content);
+        const deliveryMethodHeader = formatDeliveryMethod(metadata, primaryClient?.email);
+        const effectiveRecipientName = metadata.recipient_name || primaryClient?.full_name || '';
+        const effectiveRecipientAddress = metadata.recipient_address || [
+          primaryClient?.address_line_1 || primaryClient?.home_address || primaryClient?.business_address,
+          primaryClient?.address_line_2,
+          [primaryClient?.city, primaryClient?.state, primaryClient?.postal_code].filter(Boolean).join(', '),
+          primaryClient?.country
+        ].filter(Boolean).join('\n') || '';
+
         // Draw professional letterhead
         let logoDrawn = false;
+        let logoHeight = 0;
         const logoWidth = 100;
         const startX = 50;
         const startY = 30;
@@ -542,12 +616,19 @@ const generatePdf = (draftId, user) => {
         // Try logo from letterhead upload first, then default logo url
         if (company.letterhead_url) {
           try {
-            const letterheadPath = path.join(process.cwd(), company.letterhead_url);
+            const letterheadRel = company.letterhead_url.replace(/^[\\\/]+/, '');
+            const letterheadPath = path.join(process.cwd(), letterheadRel);
             if (fs.existsSync(letterheadPath)) {
               const img = doc.openImage(letterheadPath);
               const aspectRatio = img.width / img.height;
-              // If it's a square/logo, treat as logoFromLetterhead
-              if (!(aspectRatio > 1.8 || (aspectRatio >= 0.65 && aspectRatio <= 0.85))) {
+              if (aspectRatio > 1.8) {
+                // Wide banner letterhead header
+                const bannerW = doc.page.width - 100;
+                doc.image(letterheadPath, 50, 25, { width: bannerW });
+                logoDrawn = true;
+                logoHeight = bannerW / aspectRatio;
+              } else if (!(aspectRatio >= 0.65 && aspectRatio <= 0.85)) {
+                logoHeight = logoWidth / aspectRatio;
                 doc.image(img, startX, startY, { width: logoWidth });
                 logoDrawn = true;
               }
@@ -559,8 +640,12 @@ const generatePdf = (draftId, user) => {
 
         if (!logoDrawn && company.logo_url) {
           try {
-            const logoPath = path.join(process.cwd(), company.logo_url);
+            const logoRel = company.logo_url.replace(/^[\\\/]+/, '');
+            const logoPath = path.join(process.cwd(), logoRel);
             if (fs.existsSync(logoPath)) {
+              const img = doc.openImage(logoPath);
+              const aspectRatio = img.width / img.height;
+              logoHeight = logoWidth / aspectRatio;
               doc.image(logoPath, startX, startY, { width: logoWidth });
               logoDrawn = true;
             }
@@ -573,7 +658,7 @@ const generatePdf = (draftId, user) => {
 
         // Firm Name (more prominent, vertically aligned with logo)
         doc.fillColor('#111827');
-        doc.fontSize(22).font('Helvetica-Bold').text(company.company_name || '', companyX, 30);
+        doc.fontSize(22).font('Helvetica-Bold').text(company.company_name || 'Victoria Tulsidas Law', companyX, 30);
 
         // Address (slightly shifted to account for larger font size)
         doc.fontSize(9.5).fillColor('#4b5563').font('Helvetica');
@@ -592,7 +677,7 @@ const generatePdf = (draftId, user) => {
         }
 
         // Bottom Divider Line (placed dynamically below logo and text details)
-        const lineY = Math.max(doc.y + 12, 105);
+        const lineY = Math.max(doc.y + 12, startY + logoHeight + 12, 105);
         doc.moveTo(50, lineY)
            .lineTo(doc.page.width - 50, lineY)
            .strokeColor('#cbd5e1')
@@ -601,7 +686,7 @@ const generatePdf = (draftId, user) => {
 
         // Spacing before content
         doc.x = 50;
-        doc.y = lineY + 30;
+        doc.y = lineY + 25;
 
         // Date
         const dateStr = new Date(draft.updated_at || new Date()).toLocaleDateString('en-US', {
@@ -609,24 +694,23 @@ const generatePdf = (draftId, user) => {
           month: 'long',
           day: 'numeric'
         });
-        doc.fontSize(11).fillColor('#111827').font('Helvetica').text(dateStr);
-        doc.moveDown(2);
+        doc.fontSize(10.5).fillColor('#111827').font('Helvetica').text(dateStr);
+        doc.moveDown(1.5);
 
-        // Recipient
-        if (matter && matter.client) {
-          const client = matter.client;
-          doc.fontSize(11).fillColor('#111827').font('Helvetica-Bold').text(client.full_name || '');
-          doc.font('Helvetica');
+        // Transmission / Delivery Method Indicator (Area on the top indicating Email correspondence or US Mail)
+        doc.fontSize(10).fillColor('#003580').font('Helvetica-Bold').text(deliveryMethodHeader, {
+          characterSpacing: 0.5
+        });
+        doc.font('Helvetica');
+        doc.moveDown(1.5);
 
-          const clientAddress = [
-            client.address_line_1 || client.home_address || client.business_address,
-            client.address_line_2,
-            [client.city, client.state, client.postal_code].filter(Boolean).join(', '),
-            client.country
-          ].filter(Boolean).join('\n');
+        // Recipient ("TO:" block - where we're sending it)
+        if (effectiveRecipientName) {
+          doc.fontSize(11).fillColor('#111827').font('Helvetica-Bold').text(effectiveRecipientName);
+          doc.font('Helvetica').fontSize(10).fillColor('#374151');
 
-          if (clientAddress) {
-            doc.text(clientAddress, { lineGap: 3 });
+          if (effectiveRecipientAddress) {
+            doc.text(effectiveRecipientAddress, { lineGap: 2.5 });
           }
           doc.moveDown(2);
         }
@@ -636,8 +720,16 @@ const generatePdf = (draftId, user) => {
         doc.font('Helvetica');
         doc.moveDown(2);
 
+        // Clean body text by stripping duplicate leading date/transmission/recipient/subject lines if already present in body
+        let bodyText = resolvedContent || '';
+        bodyText = bodyText.replace(/^[\s\r\n]*(?:Date:\s*[^\n\r]+[\s\r\n]*)?/i, '');
+        bodyText = bodyText.replace(/^[\s\r\n]*(?:(?:TRANSMISSION|DELIVERY METHOD|DELIVERY)?\s*:?\s*VIA\s+[^\n\r]+[\s\r\n]*)?/i, '');
+        bodyText = bodyText.replace(/^[\s\r\n]*(?:TO:\s*[^\n\r]+(?:\n[^\n\r]+){0,4}[\s\r\n]*)?/i, '');
+        bodyText = bodyText.replace(/^[\s\r\n]*(?:RE:\s*[^\n\r]+[\s\r\n]*)?/i, '');
+        bodyText = bodyText.trim();
+
         // Letter Body Content
-        doc.fontSize(11).fillColor('#1f2937').text(resolvedContent || 'No content provided.', {
+        doc.fontSize(10.5).fillColor('#1f2937').text(bodyText || 'No content provided.', {
           lineGap: 4,
           paragraphGap: 14,
           align: 'left'

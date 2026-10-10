@@ -464,37 +464,91 @@ exports.prefillForMatter = async (matterId) => {
     }
   });
 
-  const clientStreet = matter.client?.address_line_1 || matter.client?.home_address || matter.client?.business_address || '';
-  const clientStreet2 = matter.client?.address_line_2 || '';
-  const clientCity = matter.client?.city || '';
-  const clientState = matter.client?.state || '';
-  const clientZip = matter.client?.postal_code || '';
+  // Client address assembly
+  let clientStreet = (matter.client?.address_line_1 || matter.client?.home_address || matter.client?.business_address || '').replace(/[\r\n]+/g, ', ').trim();
+  const clientStreet2 = (matter.client?.address_line_2 || '').replace(/[\r\n]+/g, ', ').trim();
+  if (clientStreet2 && !clientStreet.includes(clientStreet2)) {
+    clientStreet = `${clientStreet}, ${clientStreet2}`;
+  }
+  const clientCity = (matter.client?.city || '').trim();
+  const clientState = (matter.client?.state || '').trim();
+  const clientZip = (matter.client?.postal_code || '').trim();
   const clientCityStateZip = [clientCity, clientState ? (clientZip ? `${clientState} ${clientZip}` : clientState) : clientZip].filter(Boolean).join(', ');
-  const clientAddr = [clientStreet, clientStreet2, clientCity, clientState, clientZip].filter(Boolean).join(', ') || clientStreet;
+  const clientAddr = [clientStreet, clientCityStateZip].filter(Boolean).join(', ') || clientStreet;
 
-  const firmAddr = [
-    companyProfile?.address_line_1 || companyProfile?.address,
-    companyProfile?.city,
-    companyProfile?.state,
-    companyProfile?.postal_code,
-  ].filter(Boolean).join(', ') || '750 San Vicente Blvd, Suite 800 West, West Hollywood, CA 90069';
+  // Firm address clean parsing (separates Street from City, State, Zip, avoids multi-line overlay)
+  const rawFirmAddress = (companyProfile?.address_line_1 || companyProfile?.address || '').trim();
+  let firmStreet = rawFirmAddress;
+  let firmCity = (companyProfile?.city || '').trim();
+  let firmState = (companyProfile?.state || '').trim();
+  let firmZip = (companyProfile?.postal_code || '').trim();
+
+  if (rawFirmAddress.includes('\n')) {
+    const lines = rawFirmAddress.split('\n').map(l => l.trim()).filter(Boolean);
+    firmStreet = lines[0] || '';
+    if (lines[1]) {
+      const match = lines[1].match(/^(.*?)[,\s]+([A-Z]{2})\s*(\d{5}(?:-\d{4})?)?$/i);
+      if (match) {
+        if (!firmCity) firmCity = match[1].trim();
+        if (!firmState) firmState = match[2].toUpperCase().trim();
+        if (!firmZip && match[3]) firmZip = match[3].trim();
+      } else if (!firmCity) {
+        firmCity = lines[1];
+      }
+    }
+  } else if (!firmCity && rawFirmAddress.includes(',')) {
+    const match = rawFirmAddress.match(/^(.*?),\s*([^,]+),\s*([A-Z]{2})\s*(\d{5}(?:-\d{4})?)?$/i);
+    if (match) {
+      firmStreet = match[1].trim();
+      firmCity = match[2].trim();
+      firmState = match[3].toUpperCase().trim();
+      if (match[4]) firmZip = match[4].trim();
+    }
+  }
+
+  if (!firmCity) firmCity = 'West Hollywood';
+  if (!firmState) firmState = 'CA';
+  if (!firmZip) firmZip = '90069';
+  if (!firmStreet) firmStreet = '750 San Vicente Blvd, Suite 800';
+  firmStreet = firmStreet.replace(/[\r\n]+/g, ', ').trim();
+
+  // Combined single line without \n for full address boxes
+  const firmCityStateZip = [firmCity, firmState ? (firmZip ? `${firmState} ${firmZip}` : firmState) : firmZip].filter(Boolean).join(', ');
+  const firmAddr = [firmStreet, firmCityStateZip].filter(Boolean).join(', ');
 
   const lawyerName = matter.assigned_lawyer?.full_name || companyProfile?.owner_name || 'Victoria Tulsidas, Esq.';
   const lawyerEmail = matter.assigned_lawyer?.email || companyProfile?.email || 'vtulsidas@victoriatulsidaslaw.com';
-  const firmName = companyProfile?.company_name || 'Victoria Tulsidas Law, A Professional Legal Corporation';
-  const firmCity = companyProfile?.city || 'West Hollywood';
-  const firmState = companyProfile?.state || 'CA';
-  const firmZip = companyProfile?.postal_code || '90069';
+  const firmName = (companyProfile?.company_name || 'Victoria Tulsidas Law, A Professional Legal Corporation').trim();
   const firmPhone = companyProfile?.phone || '(310) 504-2359';
   const firmEmail = companyProfile?.email || lawyerEmail;
   const barNo = companyProfile?.bar_number || '365147';
   const opposingParty = matter.opposing_party_name || matter.opposing_party || '';
   const caseNumber = matter.case_number || matter.matter_number || '';
 
-  // Court information assembly
+  // Court information clean assembly
   const courtCounty = matter.court_county || (matter.court_name && matter.court_name.toLowerCase().includes('county') ? matter.court_name.replace(/.*county of\s*/i, '').trim() : 'Los Angeles');
   const courtName = matter.court_name || `Superior Court of California, County of ${courtCounty}`;
-  const courtAddress = matter.court_address || (matter.court_name ? `${matter.court_name}, California` : '111 N. Hill St., Los Angeles, CA 90012');
+  
+  const rawCourtAddr = (matter.court_address || '').trim() || (matter.court_name ? `${matter.court_name}, California` : '111 N. Hill St., Los Angeles, CA 90012');
+  let courtStreet = rawCourtAddr;
+  let courtCityZip = '';
+
+  const courtMatch = rawCourtAddr.match(/^(.*?),\s*([^,]+,\s*[A-Z]{2}\s*\d{5}(?:-\d{4})?)$/i);
+  if (courtMatch) {
+    courtStreet = courtMatch[1].trim();
+    courtCityZip = courtMatch[2].trim();
+  } else if (rawCourtAddr.includes(',')) {
+    const parts = rawCourtAddr.split(',').map(p => p.trim());
+    if (parts.length >= 2) {
+      courtStreet = parts[0];
+      courtCityZip = parts.slice(1).join(', ');
+    }
+  }
+  if (!courtCityZip) {
+    courtCityZip = courtCounty ? `${courtCounty}, CA` : 'Los Angeles, CA 90012';
+  }
+  courtStreet = courtStreet.replace(/[\r\n]+/g, ', ').trim();
+
   const courtDept = matter.court_department || '';
   const judgeName = matter.judge_name || '';
   const hearingDateStr = nextHearing
@@ -522,14 +576,17 @@ exports.prefillForMatter = async (matterId) => {
     attorney_fax: companyProfile?.fax || '',
     firm_name: firmName,
     FirmName: firmName,
-    firm_address: firmAddr,
-    FirmAddress: firmAddr,
+    firm_address: firmStreet,      // Street line only so it never overlaps with City/State/Zip row below it!
+    firm_street: firmStreet,
+    FirmAddress: firmStreet,
+    firm_full_address: firmAddr,
     firm_city: firmCity,
     FirmCity: firmCity,
     firm_state: firmState,
     FirmState: firmState,
     firm_zip: firmZip,
     FirmZip: firmZip,
+    firm_city_state_zip: firmCityStateZip,
     firm_phone: firmPhone,
     FirmPhone: firmPhone,
     firm_email: firmEmail,
@@ -579,8 +636,12 @@ exports.prefillForMatter = async (matterId) => {
     court_county: courtCounty,
     CourtCounty: courtCounty,
     court_branch: matter.court_name || courtCounty,
-    court_address: courtAddress,
-    CourtAddress: courtAddress,
+    court_address: courtStreet,    // Street only so it never collides with City/Zip line
+    CourtAddress: courtStreet,
+    court_street: courtStreet,
+    court_mailing_address: courtStreet,
+    court_city_zip: courtCityZip,  // Clean City & Zip only
+    court_full_address: rawCourtAddr,
     court_department: courtDept,
     court_dept: courtDept,
     dept: courtDept,
